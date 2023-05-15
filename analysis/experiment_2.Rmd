@@ -1,0 +1,2329 @@
+
+```{r include = FALSE}
+
+
+library(tidyverse)
+library(magrittr)
+library(ggplot2)
+library(psych)
+library(corx)
+library(EFAtools)
+library(lme4)
+library(lmerTest)
+library(MuMIn)
+library(janitor)
+library(readxl)
+library(itembankr)
+library(glmnet)
+library(effectsize)
+library(readr)
+library(randtests)
+library(changepoint)
+library(corrplot)
+library(flextable)
+
+
+options(kableExtra.auto_format = FALSE) # needs to go before importing kableExtra
+library(kableExtra)
+
+
+
+
+```
+
+
+
+```{r analysis-preferences}
+set.seed(42)
+knitr::opts_chunk$set(cache.extra = knitr::rand_seed)
+options(scipen = 999)
+```
+
+
+```{r, warning = FALSE}
+
+is.nan.data.frame <- function(x) do.call(cbind, lapply(x, is.nan))
+
+
+
+tidy_single_melody_trial <- function(trial) {
+  amd <- trial$answer_meta_data %>% dplyr::select(-durations)
+  trial %>% map(paste0, collapse = ",") %>% 
+    as_tibble() %>% 
+    cbind(amd) %>%
+    mutate(across(everything(), as.character))
+  
+}
+
+tidy_melody_trials_one_participant <- function(f, name) {
+  res <- readRDS(f)
+  pid <- res$session$p_id
+  melody_trials <- res[[name]]
+  melody_trials <- melody_trials[map_lgl(melody_trials, function(x) length(x) == 40)]
+  map_dfr(melody_trials, tidy_single_melody_trial) %>% mutate(p_id = pid)
+}
+
+tidy_melody_trials <- function(files_list, name, asset_type) {
+  map_dfr(files_list, tidy_melody_trials_one_participant, name = name) %>% 
+    mutate(asset_type = asset_type)
+}
+
+sort_musicassessr_setup_GMS_and_session <- function(f) {
+  print(f)
+  res <- readRDS(f)
+  mas <- res$SAA.musicasssessr_setup
+  
+  user_info <- mas$user_info$user_info %>% 
+  map(function(x)  {
+    if(is.null(x) | length(x) == 0) NA 
+    else if(is.list(x)) unlist(x, recursive = TRUE)  
+    else x
+    }) %>% purrr::flatten() 
+  
+  user_info_no_names <- which(names(user_info) == "")
+  
+  names(user_info)[user_info_no_names] <- paste0(names(user_info)[min(user_info_no_names)-1], 2:(2+length(user_info_no_names)))
+  
+  user_info <- user_info %>% as_tibble(.name_repair = "unique")
+  
+  mas_other <- tibble(microphone_type = mas$microphone_type,
+                    bottom_range = mas$bottom_range$user_response,
+                    top_range = mas$top_range$user_response)
+  
+  
+  if(is.null(res$GMS)) {
+    GMS <- tibble(`Musical Training` = NA,
+                `Singing Abilities` = NA)
+    
+  } else {
+    GMS <- tibble(`Musical Training` = res$GMS$`Musical Training`,
+                `Singing Abilities` = res$GMS$`Singing Abilities`)
+  }
+  
+  ses <- res$session %>% as_tibble()
+  
+  cbind(user_info, GMS, mas_other, ses)
+  
+}
+
+not_all_na <- function(x) {
+  any(!is.na(x))
+}
+
+
+sort_entire_instance <- function(files_list, test_instance, arrhythmic) {
+  
+  if(arrhythmic) {
+    melody_name <- "SAA.arrhythmic_melodies"
+  } else {
+    melody_name <- "SAA.rhythmic_melodies"
+  }
+  
+  melodies <- tidy_melody_trials(files_list, name = melody_name, asset_type = "SAA_melodies")
+  
+  
+  so_assets <- tidy_melody_trials(files_list, name = "SAA.sing_so_assets", 
+                                  asset_type = "so_assets")
+  
+  
+  melody_names <- names(melodies)
+  so_assets_names <- names(so_assets)
+  joint_names <- intersect(melody_names, so_assets_names)
+  
+  melodies <- melodies %>% select(joint_names)
+  so_assets <- so_assets %>% select(joint_names)
+  
+  main_dat <- melodies %>% full_join(so_assets)
+  
+  
+  other_vars <- map_dfr(files_list, sort_musicassessr_setup_GMS_and_session)
+  
+  main_dat <- main_dat %>% 
+    left_join(other_vars, by = "p_id") %>% 
+    dplyr::mutate(test_instance = test_instance)
+}
+
+
+psychTestR_res_to_single_length_lists <- function(l) {
+  map(l, function(x) if(length(x) > 1) as.list(x) else x)
+}
+
+sort_long_tone_trial <- function(t) {
+  t %>% 
+    psychTestR_res_to_single_length_lists() %>% 
+    enframe() %>% 
+    t() %>% 
+    as.data.frame() %>%
+    row_to_names(row_number = 1)
+}
+
+sort_participant_long_note_trials <- function(f, test_instance) {
+  
+  res <- readRDS(f)
+  
+  pid <- res$session$p_id
+  
+  long_tones <- res$SAA.long_tone_trials %>% 
+    map(sort_long_tone_trial) %>% 
+    bind_rows() %>% 
+    mutate(p_id = pid,
+           test_instance = test_instance) %>% 
+    as_tibble() 
+}
+
+sort_all_long_note_trials_one_batch <- function(f, test_instance) {
+  map_dfr(f, sort_participant_long_note_trials, test_instance)
+}
+
+sort_all_long_note_trials <- function(file_batch_list) {
+  map_dfr(file_batch_list, function(x) sort_all_long_note_trials_one_batch(x$files, x$name))
+}
+
+is_list_na <- function(t) {
+  is.list(t) & is.na(t[[1]])
+}
+
+cor.mtest <- function(mat, ...) {
+  mat <- as.matrix(mat)
+  n <- ncol(mat)
+  p.mat<- matrix(NA, n, n)
+  diag(p.mat) <- 0
+  for (i in 1:(n - 1)) {
+    for (j in (i + 1):n) {
+      tmp <- cor.test(mat[, i], mat[, j], ...)
+      p.mat[i, j] <- p.mat[j, i] <- tmp$p.value
+    }
+  }
+  colnames(p.mat) <- rownames(p.mat) <- colnames(mat)
+  p.mat
+}
+
+
+score_melody_note_precision <- function(all_participant_trials) {
+  tibble(freq = unlist(all_participant_trials$pyin_freq), 
+         note = unlist(all_participant_trials$nearest_stimuli_note)) %>% 
+    mutate(pitch_class = itembankr::midi_to_sci_notation(note)) %>%
+    dplyr::group_by(pitch_class) %>% 
+    dplyr::summarise(sd = sd(cents(440, freq), na.rm = TRUE)) %>% 
+    pull(sd) %>% 
+    mean(na.rm = TRUE)
+}
+
+score_melody_interval_precision <- function(all_participant_trials) {
+  tibble(interval = unlist(all_participant_trials$sung_interval), 
+         sung_interval_cents = unlist(all_participant_trials$sung_interval_cents)) %>% 
+    group_by(interval) %>% 
+    summarise(sd = sd(sung_interval_cents, na.rm = TRUE)) %>% 
+    pull(sd) %>% 
+    mean(na.rm = TRUE)
+}
+
+score_melody_note_accuracy <- function(user_prod_pitches, stimuli, freq) {
+  
+  # for each user frequency, compute the distance, in cents, to the nearest stimuli pitch
+
+
+  nearest_pitches <- 
+    find_closest_stimuli_pitch_to_user_production_pitches(stimuli_pitches = stimuli,
+                                        user_production_pitches = user_prod_pitches,
+                                                          allOctaves = TRUE)
+
+  res <- itembankr::vector_cents_between_two_vectors(freq, hrep::midi_to_freq(nearest_pitches))
+
+  mean(res, na.rm = TRUE)
+
+}
+
+
+find_closest_value <- function(x, vector, return_value) {
+  
+  # given a value, x, and a vector of values,
+  # return the index of the value in the vector, or the value itself, which is closest to x
+  # if return_value == TRUE, return the value, otherwise the index
+  res <- base::which.min(abs(vector - x))
+  res <- ifelse(return_value == TRUE, vector[res], res)
+}
+
+# rewrite singing measures
+
+score_long_note_accuracy <- function(target_pitch_midi, freqs_hz_by_user) {
+  target_pitch_hz <- hrep::midi_to_freq(target_pitch_midi)
+  cents_vector_in_rel_to_target_note <- itembankr::vector_cents(target_pitch_hz, freqs_hz_by_user)
+  # sign must be preserved to not confound accuracy and precision (at the trial level): 
+  note_accuracy <- mean(cents_vector_in_rel_to_target_note) 
+}
+
+
+get_all_octaves_in_gamut <- function(note, gamut_min = midi.gamut.min, gamut_max = midi.gamut.max) {
+
+  # given a note and a range/gamut, find all midi octaves of that note within the specified range/gamut
+  res <- c(note)
+
+  # first go down
+  while(note > gamut_min) {
+    note <- note - 12
+    res <- c(res, note)
+  }
+  # then go up
+  while(note < gamut_max) {
+    note <- note + 12
+    res <- c(res, note)
+  }
+  res <- res[!duplicated(res)]
+  res <- res[order(res)]
+  res
+}
+
+
+find_closest_stimuli_pitch_to_user_production_pitches <- 
+  function(stimuli_pitches, user_production_pitches, allOctaves = TRUE) {
+    
+  # if allOctaves is true, get the possible pitches in all other octaves. this should therefore resolve issues
+  # where someone was presented stimuli out of their range and is penalised for it
+  if (allOctaves) {
+    res <- sapply(user_production_pitches, find_closest_value, 
+                  get_all_octaves_in_gamut(stimuli_pitches), return_value = TRUE)
+  } else {
+    res <- sapply(user_production_pitches, find_closest_value, stimuli_pitches, return_value = TRUE)
+  }
+  res
+}
+
+
+
+score_melody_interval_accuracy <- function(sung_interval, 
+                                           sung_interval_cents, 
+                                           stimuli_interval) {
+  
+  tryCatch({
+    sung_interval_cents <- sung_interval_cents[2:length(sung_interval_cents)] %>% abs()
+    stimuli_interval <- stimuli_interval[2:length(stimuli_interval)] %>% abs()
+ 
+    nearest_intervals <- 
+      find_closest_stimuli_pitch_to_user_production_pitches(
+        stimuli_pitches = stimuli_interval,
+        user_production_pitches = sung_interval[!is.na(sung_interval)],
+        allOctaves = TRUE)
+  
+    r <- purrr::map2_dbl(sung_interval_cents,nearest_intervals*100, # *100 = to cents
+                     function(s, t) abs(s) - abs(t))
+    
+    mean(r, na.rm = TRUE)
+  }, error = function(err) {
+    print(err)
+    NA
+  })
+}
+
+# tests
+# is_list_na(NA)
+# is_list_na(list(NA))
+
+
+midi.gamut.min <- 21
+midi.gamut.max <- 108
+
+```
+
+
+
+
+
+```{r }
+
+one_attempt_arrhythmic_files <- list.files('../data/exp4/final_results_from_sonscience_project/one_attempt_arrhythmic', pattern = 'complete=true', full.names = TRUE)
+
+one_attempt_rhythmic_files <- list.files('../data/exp4/final_results_from_sonscience_project/one_attempt_rhythmic', pattern = 'complete=true', full.names = TRUE)
+
+
+multi_attempt_arrhythmic_files <- list.files('../data/exp4/final_results_from_sonscience_project/multi_attempt_arrhythmic', pattern = 'complete=true', full.names = TRUE)
+
+
+multi_attempt_rhythmic_files <- list.files('../data/exp4/final_results_from_sonscience_project/multi_attempt_rhythmic', pattern = 'complete=true', full.names = TRUE)
+
+
+```
+
+
+
+```{r, warning = FALSE}
+
+# DEMOGRAPHICS
+
+exp4_dem_1 <- read_excel('../data/exp4/final_results_from_sonscience_project/aux/20220531_Survey_1-4.xlsx', sheet = 1)
+exp4_dem_2 <- read_excel('../data/exp4/final_results_from_sonscience_project/aux/20220531_Survey_1-4.xlsx', sheet = 2) %>% 
+  rename(`Age Range` = `Range Age`)
+exp4_dem_3 <- read_excel('../data/exp4/final_results_from_sonscience_project/aux/20220531_Survey_1-4.xlsx', sheet = 3) %>% 
+  rename(`Age Range` = `Range Age`)
+exp4_dem_4 <- read_excel('../data/exp4/final_results_from_sonscience_project/aux/20220531_Survey_1-4.xlsx', sheet = 4)
+
+exp4_demographics <- rbind(exp4_dem_1, exp4_dem_2, exp4_dem_3, exp4_dem_4) %>% 
+  mutate(Gender = case_when(GenderId == 1 ~ "Male", TRUE ~ "Female")) %>% 
+  unique()
+
+exp4_demographic_summary <- exp4_demographics %>% 
+  count(Gender)
+
+exp4_PercentFemale <- exp4_demographic_summary %>% 
+  filter(Gender == "Female") %>% 
+  pull(n) / (exp4_demographic_summary %>% filter(Gender == "Female") %>% pull(n) + exp4_demographic_summary %>% filter(Gender == "Male") %>% 
+   pull(n))
+  
+
+exp4_age_summary <- exp4_demographics %>% 
+  dplyr::select(Age) %>% 
+  summarise(
+        SD = sd(Age),
+  Age = list(summary(Age))) %>% 
+  unnest_wider(Age) %>% 
+  mutate(across(SD:`Max.`, round, 2))
+
+
+exp4_demographic_summary_country <- exp4_demographics %>% 
+  count(CountryCode) %>% 
+  mutate(Percent = round(n/sum(n)*100, 2))
+
+#exp4_age_summary
+
+```
+
+
+```{r eval = FALSE}
+
+# NB, it's not easy to remove what look like character NAs, because they're actually nested in a list
+# Need to figure out a solution in the long run
+
+#one_attempt_arrhythmic_long_notes <- sort_all_long_note_trials_one_batch(one_attempt_arrhythmic_files)
+
+batches <- list(list(name = "one_attempt_arrhythmic", files = one_attempt_arrhythmic_files), 
+                list(name = "one_attempt_rhythmic", files = one_attempt_rhythmic_files), 
+                list(name = "multi_attempt_arrhythmic", files = multi_attempt_arrhythmic_files), 
+                list(name = "multi_attempt_rhythmic", files = multi_attempt_rhythmic_files)
+                )
+
+long_note_dat <- sort_all_long_note_trials(batches) %>% 
+  dplyr::rename(long_note_accuracy = note_accuracy,
+                long_note_precision = note_precision,
+                long_note_dtw_distance = dtw_distance,
+                long_note_accuracy_max = note_accuracy_max) %>% 
+  mutate(across(c(long_note_accuracy, long_note_precision, long_note_dtw_distance, 
+                agg_dv_long_note, na_count, dtw_distance_max, long_note_accuracy_max, 
+                note_precision_max, var, run_test, freq_max, freq_min, autocorrelation_mean), as.numeric)) %>% 
+  rowwise() %>% 
+  mutate(no_failed_tests = length(failed_tests)) %>% 
+  ungroup() 
+
+```
+
+
+```{r eval = FALSE}
+
+save(long_note_dat, file = '../data/exp4/output_data/long_note_dat.rda')
+
+```
+
+```{r}
+
+load(file = '../data/exp4/output_data/long_note_dat.rda')
+
+```
+
+
+
+The overarching objective of Experiment 2 was to update the *SAA* task to be more sophisticated and prepared for adaptive testing [@harrisonPmcharrisonPsychTestRCATPsychTestRCAT2018] in the future. First, the audio data processing undertaken post-hoc in Experiment 1 was now intended to work in real time, as the test progresses. Second, to make the test more efficient, we decided to discontinue the rehearsal paradigm, which yields long patterns of rehearsed sung recall, and replace it with the "one-shot" paradigm, whereby the participant hears a melody once, and must sing it back immediately, without rehearsal. To capture how learning develops over time, instead of capturing rehearsal, we may instead either allow a single attempt or multiple attempts, each with a new, distinct audio recording of the "one shot". 
+
+Third, in view of this new paradigm, we employed a new main dependent variable, *opti3*, an established measure of melodic similarity [@mullensiefenCognitiveAdequacyMeasurement2004; @mullensiefenModellingExpertsNotions2007; @pearceMullensiiefen2017]. *opti3* is a hybrid measure derived from the weighted sum of three individual measures which represent different aspects of melodic similarity. The similarity in interval content is captured by the *ngrukkon* measure that measures the difference of the occurrence frequencies of short pitch sequences (*N-grams*) (e.g., length 3-8) contained within two melodies [@uitdenbogerdMusicInformationRetrieval2002]. Harmonic similarity is measured by the *harmcore* measure. This measure is based on the chords implied by a melodic sequence, taking pitches and durations into account. Implied harmonies are computed using the Krumhansl-Schmuckler algorithm [@krumhanslCognitiveFoundationsMusical1990] and the harmonic sequences of the two melodies are compared by computing the number of operations necessary to transform one sequence into the other sequence [i.e., the so-called edit distance; @mongeauComparisonMusicalSequences1990]. Finally, rhythmic similarity is computed by first categorizing the durations of the notes of both melodies (known as "fuzzification") and then applying the edit distance to measure the distance between the two sequences of durations. The resulting measure of rhythmic similarity is called *rhythfuzz* [@mullensiefenCognitiveAdequacyMeasurement2004]^[For the implementation of this scoring methods, see https://github.com/sebsilas/musicassessr/blob/master/R/scoring_simile.R.]. Based on the perception data collected by @mullensiefenCognitiveAdequacyMeasurement2004, the three individual measures are weighted and combined to form a single aggregate measure of melodic similarity, *opti3*: 
+
+
+\begin{equation}
+opti3 = 3.027 * ngrukkon + 2.502 * rhythfuzz + 1.439 * harmcore
+(\#eq:opti3)
+\end{equation}
+
+
+Hence, *opti3* is sensitive to similarities and differences in three important aspects of melodic perception (pitch intervals, harmonic content, rhythm). We note that all three individual measures (*ngrukkon*, *harmcore*, *rhythfuzz*) can take values between 0 (=no similarity) and 1 (=identity) and are length-normalized by considering the number of elements of the longer melody. It is particularly appropriate for the one-shot paradigm because it allows the computation of similarity between a target melody and a sung recall which may differ slightly, but not greatly, in length. Moreover, unlike the dependent variable, *proportion_of_correct note_events* from Experiment 1, *opti3* observes the order of note events which is an important feature of melodies. See Appendix C for descriptions about these variables and @silasLearningRecallingMelodies2023 for a comprehensive assessment of melodic similarity measures applied to sung recall data.
+
+Fourth, we aimed to implement additional lower-level note and melody singing-based measures (e.g., interval precision, note accuracy), as presented in the singing accuracy literature [@pfordresherImpreciseSingingWidespread2010], rather than those which deal solely with melodic similarity. Consequently, fifth, Experiment 2 also formally models long note singing ability, taken to represent a lower-level singing ability when compared to melodic singing ability. Lastly, we aimed to add other features to improve the quality of the data collected by the online test interface, as well as adding feedback features, so that eventually such a test could be readily expanded for use in educational settings (see Table 11 for an overview of the features).
+
+With regards to item response theory modelling, we hypothesized that the modelling of arhythmic and rhythmic melodic singing data might require different statistical models. Each distinct model and respective trial blocks should serve as distinct outputs for use by other researchers, depending on their research questions and requirements.
+
+# Method
+
+## Singing Ability Assessment (SAA) enhancements
+
+As a first step in upgrading our task, we made all post-hoc steps taken in Experiment 1 (e.g., determining the *SNR*, processing audio files, scoring the data etc.) to be now available at test time. In addition, several new features were added added to the processing chain of collecting and analysing sung recall data. We describe two important updates in detail below, although inspecting the arguments to the main *SAA* function in the *R* package of the same name^[http://saa.musicassessr.com/reference/SAA.html] will provide a comprehensive list.
+
+### Real-time signal to noise ratio (SNR) computation
+
+In Experiment 1, the signal-to-noise ratio (*SNR*) was determined post-hoc and participants disqualified then. This is inefficient, since some participants complete the test despite having bad SNRs. Consequently, we designed an SNR test which works at test time and can optionally disqualify participants who did not reach a specified threshold^[Whether to use an *SNR* test is controlled via the *SNR_test* argument to *SAA* functions; whether to allow multiple attempts, or disqualify on the first failure is controlled by the *allow_repeat_SNR_tests* argument; whether to display the captured *SNR* as feedback to the participant is controlled via the *report_SNR* argument.]. The *SNR* formula consists of computing the ratio of the signal amplitude over the background noise amplitude. These amplitudes can be estimated with the root mean square, and the SNR is calculated in *dB* according to
+
+\begin{equation}
+SNR = 20 \times \log10(RMS_{signal}/RMS_{noise})
+(\#eq:snr)
+\end{equation}
+
+Whereas in Experiment 1, we used the *SNR* value of 0, we found a more principled selection based on @kimCrepeConvolutionalRepresentation2018. The graphs in their paper suggested that the *pYIN* algorithm's accuracy starts deteriorating substantially when an SNR ratio < 14 is present. Consequently, by default, all participants are required to have a minimum *SNR* of 14 to proceed with the rest of the *SAA* test.^[This can be altered via the `min_SNR` argument to the *SAA* test function.]
+
+### Real-time vocal range determined from singing
+
+Instead of participants selecting a vocal range which best suits their voice based on audio examples, the new version of the test asks the participant to sing a low note and a high note, and based on this, computes a vocal range, or a likely vocal range^[The *adjust_range* argument allows this to be "corrected" if, via some heuristics, it seems that the participant did not complete the task appropriately (e.g., sings a "high" note lower than a "low" note).]. After the individual vocal range has been captured, each stimulus will be transposed into the range of the participant such that its mean note is matched to the mean note of the user's range.
+
+
+# Participants
+
+910 participants aged `r exp4_age_summary$Min.`-`r exp4_age_summary$Max.` (*M* = `r exp4_age_summary$Mean`, *SD* = `r exp4_age_summary$SD`; `r round(exp4_PercentFemale*100, 2)`% female were recruited through the *SliceThePie* marketing panel, across four testing conditions (*N* = `r nrow(exp4_dem_1)`; *N* = `r nrow(exp4_dem_2)`; *N* = `r nrow(exp4_dem_3)`; *N* = `r nrow(exp4_dem_4)`). 67% were from the US, 25% UK, 5% Canada, and the remaining other countries. 8 participants' demographic data was missing (reason unknown).
+
+
+# Materials
+
+Other than the updated *SAA* test, the only other material employed was the *Gold-MSI* inventory as described in Experiment 1. This again yielded self-reported measures of Musical Training and Singing Abilities based on the factor model described in @mullensiefenMusicalityNonmusiciansIndex2014. The task was again deployed on an *AWS EC2* server instance, where the scoring was now done in real-time. All scores were downloaded post-hoc for statistical analyses. 
+
+
+# Procedure
+
+The procedure of the *SAA* battery was essentially the same as Experiment 1, but with scoring being done on-the-fly (not known to the participant), as well as the *SNR* test disqualifying people at test time, and the vocal range being computed in real time via singing low and high notes. The long note singing task was also identical, except for the new scoring measures computed at the backend of the test.
+
+## The one-shot paradigm
+
+In Experiment 1, participants were encouraged to rehearse learning a melody aloud, and could hear a target melody up to three times during their rehearsal process. Consequently, each audio file might represent up to 3 distinct attempts (i.e., after each playback), as well as rehearsal within/between each discrete attempt.
+
+Conversely, the melody singing paradigm in Experiment 2 required participants to sing back a melody in 'one shot' after hearing it. The meaning of one-shot here means "without rehearsal" and that, after hearing a melody, the participant must try sing it back as best they can immediately (once). This produces a clear one-to-one correspondence between a heard melody, a sung recall and an audio file. However, as in @slobodaImmediateRecallMelodies1985, there can still be multiple attempts per item (by default, up to 4, for statistical reasons). The difference is that the one-shot paradigm produces one audio file per attempt, unlike in the rehearsal paradigm, where multiple distinct attempts might all be contained in one audio file. In both cases, attempts are nested in items; in the rehearsal paradigm, all attempts and rehearsal are nested in a single audio file; in the one-shot paradigm; each single attempt is in a single audio file.
+
+
+## Procedure variants
+
+Testing was deployed across 4 different conditions, which were released online via *SliceThePie* in a staggered fashion, but then ran simultaneously: 1) one-attempt arhythmic melodies; 2) one-attempt rhythmic melodies; 3) multi-attempt-arhythmic melodies; 4) multi-attempt rhythmic melodies. In the multi-attempt variants, participants could optionally have up to 3 attempts per melody, if they wanted.
+
+```{r eval = FALSE}
+
+one_attempt_arrhythmic <- sort_entire_instance(one_attempt_arrhythmic_files,
+                                               test_instance = "one_attempt_arrhythmic",
+                                               arrhythmic = TRUE)
+
+
+save(one_attempt_arrhythmic, file = '../data/output_data/one_attempt_arrhythmic.rda')
+
+```
+
+```{r eval = FALSE}
+
+one_attempt_rhythmic <- sort_entire_instance(one_attempt_rhythmic_files,
+                                               test_instance = "one_attempt_rhythmic",
+                                               arrhythmic = FALSE)
+
+
+save(one_attempt_rhythmic, file = '../data/output_data/one_attempt_rhythmic.rda')
+
+```
+
+
+```{r eval = FALSE}
+
+multi_attempt_arrhythmic <- sort_entire_instance(multi_attempt_arrhythmic_files,
+                                               test_instance = "multi_attempt_arrhythmic",
+                                               arrhythmic = TRUE)
+
+
+save(multi_attempt_arrhythmic, file = '../data/output_data/multi_attempt_arrhythmic.rda')
+
+```
+
+
+```{r eval = FALSE}
+
+multi_attempt_rhythmic <- sort_entire_instance(multi_attempt_rhythmic_files,
+                                               test_instance = "multi_attempt_rhythmic",
+                                               arrhythmic = FALSE)
+
+
+save(multi_attempt_rhythmic, file = '../data/output_data/multi_attempt_rhythmic.rda')
+
+```
+
+
+```{r eval = FALSE}
+
+load(file = '../data/exp4/output_data/one_attempt_arrhythmic.rda')
+
+load(file = '../data/exp4/output_data/one_attempt_rhythmic.rda')
+
+load(file = '../data/exp4/output_data/multi_attempt_arrhythmic.rda')
+
+load(file = '../data/exp4/output_data/multi_attempt_rhythmic.rda')
+
+
+```
+
+```{r eval = FALSE}
+
+
+joint_names <- Reduce(intersect, list(names(one_attempt_arrhythmic), 
+                                      names(one_attempt_rhythmic), 
+                                      names(multi_attempt_arrhythmic), 
+                                      names(multi_attempt_rhythmic)))
+
+df_list <- list(one_attempt_arrhythmic, one_attempt_rhythmic, multi_attempt_arrhythmic, multi_attempt_rhythmic)
+
+```
+
+```{r eval = FALSE}
+
+dat <- map_dfr(df_list, function(df) {
+  df %>% dplyr::select(joint_names) 
+}) %>% 
+  dplyr::select(where(not_all_na)) %>% 
+  as_tibble() %>% dplyr::select(-c(user_satisfied, user_rating, melconv_notes, melconv_durations)) %>% 
+  mutate(across(c(`Musical Training`,
+    `Singing Abilities`, bottom_range, top_range, num_restarts, stimuli_length, trial_length,
+    no_note_events, no_correct, no_errors, errors_boolean, no_correct_octaves_allowed, no_errors_octaves_allowed, proportion_of_correct_note_events, proportion_of_correct_note_events_octaves_allowed, proportion_of_correct_note_events_controlled_by_stimuli_length_log_normal, proportion_of_correct_note_events_octaves_allowed_controlled_by_stimuli_length_log_normal, proportion_of_stimuli_notes_found, proportion_of_stimuli_notes_found_octaves_allowed, opti3, ngrukkon, harmcore, rhythfuzz, note_precision, melody_dtw, mean_cents_deviation_from_nearest_stimuli_pitch, mean_cents_deviation_from_nearest_midi_pitch, N, rel_freq, log_freq, tonalness, tonal.clarity,
+    tonal.spike, step.cont.glob.var,step.cont.glob.dir, step.cont.loc.var, d.entropy, d.eq.trans, mean_duration, mean_int_size, int_range, dir_change, mean_dir_change, int_variety, pitch_variety, mean_run_length, span), as.numeric)) %>% 
+  mutate(audio_file = str_remove(file, "/srv/shiny-server/files/")) %>% 
+  separate(col=file, into=c("ditch", "ditch2", "melody_no", "attempt", "ditch3"), sep="_") %>%
+  separate(col=ditch3, into=c("attempt", "ditch8", "ditch9"), sep="[.]") %>%
+  separate(col=ditch, into=c("ditch4", "ditch5", "ditch6", "ditch7", "melody_type"), sep="/") %>%
+  dplyr::select(!contains('ditch')) %>%
+  mutate(attempt = as.numeric(attempt),
+         p_id  = as.numeric(p_id), # to get rid of any non-SO IDs (only numeric IDS can be coerced)
+         i.entropy = itembankr::get_interval_entropy(melody),
+         asset_type = case_when(asset_type == "SAA_mmelodes" ~ "SAA_melodies", TRUE ~ asset_type)) %>% # correct typo
+  filter(nchar(p_id) == 6 | nchar(p_id) == 7) %>%
+  rowwise() %>%
+  mutate(unique_melody_name = paste0(stimuli, "|", stimuli_durations)) %>%
+  ungroup()
+
+save(dat, file = '../data/exp4/output_data/dat.rda')
+
+rm(one_attempt_arrhythmic, one_attempt_rhythmic, multi_attempt_arrhythmic, multi_attempt_rhythmic, df_list)
+gc()
+
+
+```
+
+
+
+```{r}
+
+load(file = '../data/exp4/output_data/dat.rda')
+
+```
+
+
+
+```{r eval = FALSE}
+
+dat <- dat %>%
+  rowwise() %>% 
+  mutate(pyin = list(pyin::pyin(paste0('../data/exp4/final_results_from_sonscience_project/sonscience_melodic_recall_audio/', audio_file)))) %>% 
+  ungroup()
+
+
+save(dat, file = '../data/exp4/output_data/dat3.rda')
+
+```
+
+
+```{r}
+
+load(file = '../data/exp4/output_data/dat3.rda')
+
+```
+
+
+
+```{r warning=FALSE, eval = FALSE}
+
+dat <- dat %>% 
+  dplyr::filter(!is.na(pyin)) %>% 
+  rowwise() %>% 
+  mutate(pyin = pyin %>% mutate(sung_interval = c(NA, diff(note)),
+                                sung_interval_cents = itembankr::cents(dplyr::lag(freq), freq))  %>% list(),
+         pyin_freq = pyin %>% pull(freq) %>% list(),
+         pyin_note = pyin %>% pull(note) %>% list(),
+         sung_interval = pyin %>% pull(sung_interval) %>% list(),
+         sung_interval_cents = pyin %>% pull(sung_interval_cents) %>% list(),
+         melody_note_accuracy = score_melody_note_accuracy(pyin_note, itembankr::str_mel_to_vector(stimuli), unlist(pyin_freq)),
+      stimuli_df = list(tibble(
+      stimuli = itembankr::str_mel_to_vector(stimuli),
+      stimuli_interval = c(NA, diff(stimuli)),
+      stimuli_freq = hrep::midi_to_freq(stimuli),
+      stimuli_interval_cents = itembankr::cents(dplyr::lag(stimuli_freq), stimuli_freq))),
+  melody_interval_accuracy = score_melody_interval_accuracy(sung_interval, sung_interval_cents, stimuli_interval)) %>% 
+  ungroup()
+
+save(dat, file = '../data/exp4/output_data/dat4.rda')
+
+```
+
+```{r}
+
+load(file = '../data/exp4/output_data/dat4.rda')
+
+```
+
+```{r warning = FALSE, include = FALSE, eval = FALSE}
+
+dat <- dat %>%  
+  rowwise() %>% 
+  mutate(
+    melody_interval_accuracy = score_melody_interval_accuracy(sung_interval, sung_interval_cents, stimuli_df$stimuli_interval)) %>% 
+  ungroup()
+
+save(dat, file = '../data/exp4/output_data/dat5.rda')
+
+
+```
+
+
+```{r}
+
+load(file = '../data/exp4/output_data/dat5.rda')
+
+```
+
+
+
+```{r warning = FALSE, eval = FALSE}
+
+dat <- dat %>% 
+  rowwise() %>% 
+  mutate(stimuli_note = list(stimuli_df %>% pull(stimuli)),
+         nearest_stimuli_note = list(find_closest_stimuli_pitch_to_user_production_pitches(stimuli_pitches = stimuli_note,
+                                        user_production_pitches = pyin_note,
+                                                          allOctaves = TRUE))) %>% 
+  ungroup()
+
+save(dat, file = '../data/exp4/output_data/dat6.rda')
+
+
+```
+
+
+```{r}
+
+load(file = '../data/exp4/output_data/dat6.rda')
+
+```
+
+
+
+```{r}
+
+dat_only_Berkowitz <- dat %>% 
+  filter(asset_type == "SAA_melodies")
+
+```
+
+
+```{r}
+
+dat_only_SO <- dat %>% 
+  filter(asset_type == "so_assets", attempt == 1) %>% 
+  separate(midi_file, into = c("bye", "bye2", "bye3", "Audio"), sep = "/") %>% 
+  mutate(Logo = str_remove(Audio, ".mid"))
+
+```
+
+```{r eval = FALSE}
+
+dat_SO_min <- dat_only_SO %>% 
+  dplyr::select(p_id, Logo, opti3)
+
+write_csv(dat_SO_min, file = '../data/other/SO_Melodies_opti3.csv')
+
+```
+
+```{r include = FALSE}
+
+so_mod <-  dat_only_SO %>% 
+  filter(attempt == 1) %>% 
+  lmerTest::lmer(opti3 ~ (1|p_id) + (1|Logo) + (1|p_id:Logo), data = .)
+
+summary(so_mod)
+
+MuMIn::r.squaredGLMM(so_mod)
+
+logo_predictions <- ranef(so_mod) %>% 
+  pluck('Logo') %>% 
+  as.data.frame() %>% # remember tibbles don't allow rownames, which we want in this case
+  tibble::rownames_to_column(var = "Logo") %>% 
+  rename(Hummability = `(Intercept)`)
+
+```
+
+
+
+```{r, warning = FALSE}
+
+dat_SO_opti <- dat_only_SO %>% 
+  group_by(Logo) %>% 
+  summarise(opti3 = mean(opti3, na.rm = TRUE)) %>% 
+  ungroup() %>% 
+  mutate(opti3 = case_when(is.nan(opti3) ~ as.numeric(NA), TRUE ~ opti3))
+
+```
+
+
+
+```{r}
+
+logo_predictions <- logo_predictions %>% 
+  left_join(dat_SO_opti, by = "Logo")
+
+```
+
+```{r}
+
+readr::write_csv(logo_predictions, file = '../data/other/logo_predictions.csv')
+
+```
+
+
+# Data analysis
+
+A summary of the variables computed from the raw data and used across the experiments is presented in Table 3.
+
+```{r, warning = FALSE}
+
+no_unique_melodies <- dat_only_Berkowitz %>% 
+  summarise(no_unique_melody = stimuli %>% n_distinct(unique_melody_name)) %>% 
+  pull(no_unique_melody)
+                    
+```
+
+\newpage
+
+```{r}
+
+exp4_tab1 <- tibble(Measure = character(), Description = character())
+
+ft <- qflextable(exp4_tab1)
+
+ft <- add_body(ft, top = FALSE, values = tibble(Measure = "Long Note", Description = " ") )
+
+ft <- add_body(ft,
+               top = FALSE,
+               values = tibble(
+                 Measure =  c(
+                 "long_note_accuracy", 
+                 "long_note_var",
+                  "long_note_dtw_distance",
+                  "long_note_autocorrelation_mean",
+                  "long_note_run_test",
+                  "long_note_no_cpts",
+                  "long_note_beginning_of_second_cpt",
+                 "pca_long_note_accuracy",
+                 "pca_long_note_volatility",
+                 "pca_long_note_scoop"),
+                 Description = c(
+                    "The average deviation from the target notes in cents.",
+    "The variance of the pYIN smoothed pitch track (in Hz).",
+    "The distance between an idealised pitch track and the sung pitch track, as computed by the dynamic time warp algorithm.",
+    "The mean autocorrelation value of the pYIN smoothed pitch track (in Hz).",
+    "The Wald-Wolfowitz Runs Test statistic applied to the pYIN smoothed pitch track (in Hz).",
+    "The number of 'changepoints' as computed by the cpt.mean function from the R package changepoint",
+    "The beginning of the second changepoint in seconds (which could indicate long note scoop).",
+    "A PCA weighted sum comprised predominantly of long_note_accuracy and long_note_dtw_distance.",
+    "A PCA weighted sum comprised predominantly of long_note_autocorrelation_mean, long_note_run_test and long_note_no_cpts.",
+    "A PCA weighted sum comprised predominantly of long_note_no_cpts and long_note_beginning_of_second_cpt.")))
+
+
+ft <- add_body(ft, top = FALSE, values = tibble(Measure = "Melody", Description = " ") )
+
+
+ft <- add_body(ft,
+               top = FALSE,
+               values = tibble(
+                 Measure =  c(
+                   "SAA_Ability",
+                 "SAA_Ability_Arrhythmic",
+                 "SAA_Ability_Rhythmic",
+                 "opti3", 
+                 "proportion_of_correct_note_events"),
+                 Description = c(
+    "A score reflecting ability on both arrhythmic and rhythmic items simultaenously. It is equivalent to the random participant intercept from Model 1.",
+    "A score reflecting ability on only arrhythmic items. It is equivalent to the random participant intercept from Model 2.2",
+    "A score reflecting ability on only rhythmic items. It is equivalent to the random participant intercept from Model 3.2",
+                   "A hybrid measure of melodic similarity comprising a weighted sum of the similarity of interval, rhythm and harmonic information (Müllensiefen & Frieler, 2004). Specifically: opti3 = 3.027 * ngrukkon + 2.502 * rhythfuzz + 1.439 * harmcore.",
+                   "The proportion of correct note events, as sung by the user.")))
+
+
+
+ft <- add_body(ft, top = FALSE, values = tibble(Measure = "Established measures of singing accuracy", Description = " ") )
+
+
+ft <- add_body(ft,
+               top = FALSE,
+               values = tibble(
+                 Measure =  c(
+                 "melody_note_precision",
+                  "melody_note_accuracy",
+                  "interval_precision",
+                  "interval_accuracy",
+                 "pca_melodic_singing_accuracy"),
+                 Description = c(
+                   "The consistency with which a singer produces specific pitch classes across repeated occurrences, independent of the proximity of each occurrence to the target pitch. (Pfordresher et al. 2010)",
+    "Average proximity of each produced F0 to each target F0 (Pfordresher et al. 2010).",
+    "A similar measure to note precision, but for intervals. (Pfordresher et al. 2010)",
+    "A similar measure to note accuracy, but for intervals. (Pfordresher et al. 2010)",
+    "A PCA weighted sum comprising of melody_note_precision, interval precision and interval_accuracy.")))
+
+
+ft <- add_body(ft, top = FALSE, values = tibble(Measure = "Hardware", Description = " ")) 
+
+ft <- add_body(ft,
+               top = FALSE,
+               values = tibble(
+                 Measure =  c("hardware_concurrency", "device_memory"),
+                 Description = c(
+                   "The number of logical processors available to run threads on the user's computer.",
+"The approximate amount of device memory in gigabytes and the self-reported indicator of whether a user was using an internal or external microphone.")))
+
+ft <- bg(ft, i = c(9, 10, 11, 23), bg = "#F3DFA2", part = "body")
+
+
+ft <- bg(ft, i = 13:15, bg = "#ABD8DC", part = "body")
+
+
+ft <- bg(ft, i = c(1, 12, 18, 24), bg = "#BB4430", part = "body")
+
+ft <- set_caption(ft, caption = "Variables used across the experiments, arranged by category (red): Long Note, Melody, Established measures of singing accuracy and Hardware. Aggregate measures are highlighted in light brown and scores (model outputs) in blue.")
+
+# #EFE6DD could also be used 
+set_table_properties(ft, layout = "autofit")
+
+
+```
+
+## Long note singing
+
+To analyse the long note data, first we averaged the scores across the 5 trials, for each participant, on each of the seven long note singing measures as described in Table 3. Then we employed parallel analysis [@hornRationaleTestNumber1965] and a series of principal components analyses (*PCA*) as a means of dimension reduction. Long note scores were extracted for each participant from the final *PCA* model. This score was taken to represent a basic low-level note singing ability, distinct from melodic singing.
+
+
+## Melody singing
+
+
+The melody singing analysis was much the same as Experiment 1, employing the explanatory item response theory modelling approaches described earlier, but with *opti3* as dependent variable. In addition to a model which models all data (rhythmic and arhythmic) simultaneously, yielding an overall *SAA_Ability_Score*, we create separate models based on only arhythmic (*SAA_Arhythmic*) or rhythmic (*SAA_Rhythmic*) melodic data. Later in our analyses, we use the broader *SAA_Ability_Score* for relating rhythmic and arhythmic melody data to other variables simultaneously, though we recommend that the two separate arrhythmic (*SAA_Arhythmic*) and rhythmic (*SAA_Rhythmic*) scores are used by future researchers, to reflect the slightly distinct abilities which the models represent. The empirical dataset comprised `r pretty_comma(nrow(dat_only_Berkowitz))` trials of data, with `r pretty_comma(no_unique_melodies)` unique melodic items selected from the tokenized (N-gram) Berkowitz corpus.
+
+
+
+```{r eval = FALSE, include = FALSE}
+
+# attempt is not significant. Why?
+
+# not many people bother to go to the second or third attempt
+
+dat_only_Berkowitz %>% 
+  count(attempt)
+
+
+# so we only present first attempt arrhythmic vs arrhythmic models..
+
+
+```
+
+Initially we had planned to also analyse the multiple attempt versions of our data collection separately and include attempt as a fixed effect. However, very few participants actually elected to take a second or third attempt. Whilst there are 6,633 trials of participants having a first attempt, there are only 417 for a second attempt and 95 for a third attempt. This seems to suggest that multiple attempt trials do not seem to work well in the context of a relatively uncontrolled internet experiment, at least when there is no incentive for participants to increase their singing accuracy. Consequently, we did not model attempt and instead, filtered the dataset to only contain  the first trial (i.e., even where participants could have had more than one attempt).
+
+## Principal components analysis of established measures of melody singing accuracy
+
+
+Instead of assessing the relationship of the derived *SAA_Ability_Score* through correlations with other musical ability tests as in Experiment 1, we assessed it alongside previously validated measures of singing accuracy described in @pfordresherImpreciseSingingWidespread2010 (note accuracy, note precision, interval accuracy, interval precision), scored on the same data. However, first we submitted these variables to a unidimensional *PCA* and extracted component scores for each sung melody from the resulting model.
+
+
+## Higher level modelling
+
+These dimension reduction processes yielded aggregate melodic singing scores, along with the aggregate long note component scores, which we then correlated to assess their relationship with one another. Additionally, we assessed the relationship of the *SAA_Ability_Score* derived from the explanatory item response model (i.e. random intercepts from the mixed effects model) which includes both rhythmic and arhythmic melodies with measures of hardware setup which were collected through the internet browser, as a means of determining potential error sources. The hardware measures were *hardware_concurrency*, defined as the number of logical processors available to run threads on the user's computer, and *device_memory*, the approximate amount of device memory in gigabytes, and the self-reported indicator of whether a user was using an internal or external microphone.
+
+Finally, to formally model how lower-level singing abilities as well as demographic predictors (age, gender, level of musical training) might predict the higher level melodic recall *SAA_Ability_Score*, we constructed a multiple regression model with the *SAA_Ability_Score* as dependent variable and the lower level variables (e.g., *note_precision*, *long_note_accuracy*) described above as predictors.
+
+
+
+```{r}
+# recompute measures (old ones may not have been implemented correctly) and derive new ones.
+long_note_dat <- long_note_dat %>% 
+  dplyr::select(
+    file, stimuli, failed_tests, no_failed_tests, p_id, test_instance,
+  ) %>% 
+  mutate(
+    file = str_remove(file, "/srv/shiny-server/files/"),
+    local_file = paste0("../data/exp4/final_results_from_sonscience_project/sonscience_melodic_recall_audio_long_note/", file)
+  ) 
+
+
+```
+
+
+```{r eval = FALSE}
+
+long_note_dat <- long_note_dat %>% 
+  rowwise() %>% 
+  mutate(pyin = list(pyin::pyin(local_file, type = "both")),
+         pyin_pitch_track = list(pyin$pitch_track),
+         pyin = list(pyin$notes)) %>% 
+  ungroup()
+
+save(long_note_dat, file = '../data/exp4/output_data/long_note_dat2.rda')
+
+
+```
+
+
+```{r}
+
+load(file = '../data/exp4/output_data/long_note_dat2.rda')
+
+
+```
+
+
+
+```{r}
+
+cents_in_relation_to_lowest_f0 <- function(pyin_pitch_track) {
+  # transform F0 measurements to cents, relative to the lowest F0 in the sequence.
+  min_f0 <- min(pyin_pitch_track)
+  print(min_f0)
+  itembankr::vector_cents(min_f0, pyin_pitch_track)
+}
+
+
+long_note_accuracy <- function(target_pitch_midi, pyin_pitch_track) {
+  target_pitch_hz <- hrep::midi_to_freq(target_pitch_midi)
+  mean(itembankr::vector_cents(target_pitch_hz, pyin_pitch_track), na.rm = TRUE)
+}
+
+
+```
+
+
+
+```{r, echo = FALSE, eval = FALSE}
+
+
+test_long_note_scoop <- long_note_dat %>% 
+                            slice(1) %>% 
+                            pull(pyin_pitch_track) %>% 
+                            pluck(1)
+
+
+
+ansmean <- cpt.mean(test_long_note_scoop$freq, method = 'BinSeg')
+plot(ansmean,cpt.col='blue')
+
+max_cpt <- ansmean@ncpts.max
+cpts <- ansmean@cpts
+
+
+# for "typical" trials, we could take the penultimate as when the stable signal starts, but many trials don't appear to have a stable part, or have many stable pars. so we could take the cpts as a feature
+cpts[max_cpt-1]
+
+
+```
+
+
+```{r, echo = FALSE, eval = FALSE}
+
+
+dd <- musicassessr::calculate_stable_part(test_long_note_scoop, plot = FALSE)
+
+```
+
+
+
+
+
+```{r eval = FALSE}
+
+long_note_dat_nas_removed <- long_note_dat %>% 
+  rowwise() %>% 
+  mutate(
+    analysable = !is.logical(pluck(pyin_pitch_track, 1))  
+    ) %>% 
+  ungroup() %>% 
+  filter(analysable)
+
+```
+
+
+```{r eval = FALSE}
+
+long_note_dat_nas_removed <- long_note_dat_nas_removed %>% 
+  rowwise() %>% 
+  mutate(
+    pyin_pitch_track_freq = pyin_pitch_track %>% pull(freq) %>% list(),
+    long_note_accuracy = long_note_accuracy(target_pitch_midi = stimuli,
+                   pyin_pitch_track = pyin_pitch_track_freq),
+    long_note_var = var(pyin_pitch_track_freq),
+    long_note_dtw_distance = dtw::dtw(pyin_pitch_track_freq, itembankr::produce_arrhythmic_durations(length(pyin_pitch_track_freq), hrep::midi_to_freq(stimuli)))$distance,
+       autocorrelation_mean = mean(abs(acf(pyin_pitch_track_freq, na.action = na.pass, plot = FALSE)$acf)),
+    run_test = as.numeric(runs.test(pyin_pitch_track_freq)$statistic),
+    stable_part = list(calculate_stable_part(pyin_pitch_track, plot = FALSE))
+  ) %>% 
+  ungroup() %>% 
+  unnest_wider(stable_part) %>% 
+  dplyr::select(-`...1`) %>% 
+  unique()
+
+
+save(long_note_dat_nas_removed, file = '../data/exp4/output_data/long_note_dat_nas_removed.rda')
+
+
+```
+
+```{r}
+
+load(file = '../data/exp4/output_data/long_note_dat_nas_removed.rda')
+
+```
+
+
+```{r}
+
+# derive long note aggregate score
+
+long_note_vars <- long_note_dat_nas_removed %>% 
+  dplyr::select(p_id, test_instance, long_note_accuracy, long_note_var,
+  long_note_dtw_distance, autocorrelation_mean, run_test, no_cpts, beginning_of_second_cpt) %>% 
+  rename(long_note_autocorrelation_mean = autocorrelation_mean,
+         long_note_run_test = run_test,
+         long_note_no_cpts = no_cpts, 
+         long_note_beginning_of_second_cpt = beginning_of_second_cpt)
+
+```
+
+```{r include = FALSE}
+
+long_note_vars %>% 
+  dplyr::select(-c(p_id, test_instance)) %>% 
+  itembankr::hist_item_bank()
+
+```
+
+
+```{r, warning = FALSE}
+
+long_note_agg <- long_note_vars %>% 
+  dplyr::group_by(p_id, test_instance) %>% 
+  dplyr::summarise(across(long_note_accuracy:long_note_beginning_of_second_cpt, mean, na.rm = TRUE)) %>% 
+  dplyr::mutate(long_note_accuracy = abs(long_note_accuracy)) %>% 
+  ungroup()
+
+# NB: When computing note accu- racy for an individual, the sign of each difference must be preserved, otherwise precision and accuracy are confounded Schutz and Roy, 1973. However, after assessing an indi- vidual’s mean note accuracy, the sign may be removed when comparing that individual to others without confounding ac- curacy and precision, which we do for the purpose of com- puting linear regressions.
+
+
+
+```
+
+```{r include = FALSE}
+
+long_note_agg %>% 
+  dplyr::select(-c(p_id, test_instance)) %>% 
+  fa.parallel()
+
+```
+
+```{r include = FALSE}
+
+long_note_pca <- long_note_agg %>%
+  dplyr::select(-c(p_id, test_instance)) %>%
+  principal(nfactors = 3)
+
+print(long_note_pca, cut = 0.3)
+
+```
+
+
+```{r include = FALSE}
+
+long_note_pca2 <- long_note_agg %>% 
+  dplyr::select(-c(p_id, test_instance, long_note_var)) %>%  
+  principal(nfactors = 3)
+
+print(long_note_pca2, cut = 0.3)
+
+```
+
+
+```{r}
+
+save(long_note_agg, file = '../data/exp4/output_data/long_note_agg.rda')
+
+```
+
+```{r}
+
+save(long_note_pca2, file = '../data/exp4/output_data/long_note_pca.rda')
+
+```
+
+
+```{r}
+
+long_note_aggregate_scores <- long_note_pca2$scores %>% 
+  as_tibble() %>% 
+  dplyr::rename(pca_long_note_volatility = RC1, 
+                pca_long_note_accuracy = RC2,
+                pca_long_note_scoop = RC3)
+
+long_note_agg <- cbind(long_note_aggregate_scores, long_note_agg)
+
+```
+
+
+
+
+
+
+
+```{r eval = FALSE, warning = FALSE}
+
+singing_scores <- dat %>% 
+  filter(asset_type == "SAA_melodies") %>% 
+  dplyr::group_by(p_id, test_instance) %>% 
+  dplyr::summarise(p_id = p_id,
+            note_precision = score_melody_note_precision(cur_data()),
+            interval_precision = score_melody_interval_precision(cur_data()),
+            melody_note_accuracy = mean(melody_note_accuracy, na.rm = TRUE),
+            melody_interval_accuracy = mean(melody_interval_accuracy, na.rm = TRUE)) %>% 
+  ungroup() %>% 
+  unique()
+
+
+save(singing_scores, file = '../data/exp4/output_data/singing_scores.rda')
+
+
+```
+
+
+```{r}
+
+load(file = '../data/exp4/output_data/singing_scores.rda')
+
+```
+
+```{r include = FALSE}
+
+singing_vars <- singing_scores %>% 
+  dplyr::select(-c(p_id, test_instance)) %>% 
+  mutate(melody_note_accuracy_abs = abs(melody_note_accuracy),
+         melody_interval_accuracy_abs = abs(melody_interval_accuracy))
+
+singing_vars %>% 
+  itembankr::hist_item_bank()
+
+```
+
+
+
+
+```{r include = FALSE, warning = FALSE}
+
+long_note_aggregate_scores$p_id <- as.integer(long_note_agg$p_id)
+long_note_aggregate_scores$test_instance <- long_note_agg$test_instance
+
+
+other_dvs <- dat %>% 
+  dplyr::select(p_id, test_instance, trial_length, no_note_events, no_correct, no_errors, no_correct_octaves_allowed, no_errors_octaves_allowed, proportion_of_correct_note_events, proportion_of_correct_note_events_controlled_by_stimuli_length_log_normal, proportion_of_correct_note_events_octaves_allowed_controlled_by_stimuli_length_log_normal, proportion_of_stimuli_notes_found, proportion_of_stimuli_notes_found_octaves_allowed, opti3, ngrukkon, harmcore, rhythfuzz)
+
+long_note_agg_small <- long_note_agg %>% 
+  dplyr::select(contains('pca'), p_id, test_instance, long_note_var)  %>% 
+  mutate(p_id = as.double(p_id))
+
+# long_note_var as separate indicator
+
+dvs_summarised <- other_dvs %>% 
+  group_by(p_id, test_instance) %>% 
+  summarise(across(trial_length:rhythfuzz, mean, na.rm = TRUE)) %>% 
+  ungroup() %>% 
+  left_join(singing_scores, by = c("p_id", "test_instance")) %>% 
+  left_join(long_note_agg_small, by = c("p_id", "test_instance")) %>% 
+  mutate(across(where(is.numeric), round, 2))
+
+
+```
+
+
+```{r include = FALSE}
+
+M_dvs <- dvs_summarised %>%
+  dplyr::select(-c(p_id, test_instance)) %>% 
+  cor(use = 'pairwise.complete.obs')
+
+testRes <- dvs_summarised %>%
+  dplyr::select(-c(p_id, test_instance)) %>% 
+  as.matrix() %>% 
+  cor.mtest(conf.level = 0.95)
+
+
+colnames(M_dvs) <- abbreviate(colnames(M_dvs))
+row.names(M_dvs) <- abbreviate(colnames(M_dvs))
+
+
+
+corrplot(M_dvs, 
+         p.mat = testRes, 
+         sig.level = 0.10, 
+         order = 'hclust', 
+         addrect = 2, 
+         method = 'number',
+         type = 'upper')
+
+```
+
+
+```{r include = FALSE}
+
+# melody separate probably better
+
+melody_pca1 <- dvs_summarised %>% 
+  dplyr::select(note_precision:melody_interval_accuracy) %>% 
+  principal(nfactors = 1)
+
+print(melody_pca1, cut = 0.3, order = TRUE)
+
+```
+
+```{r include = FALSE}
+
+melody_pca2 <- dvs_summarised %>% 
+  dplyr::select(note_precision, interval_precision, melody_interval_accuracy) %>% 
+  psych::principal(nfactors = 1)
+
+print(melody_pca2, cut = 0.3, order = TRUE)
+
+save(melody_pca2, file = 'melody_pca2.rda')
+
+melody_pca2_data <- dvs_summarised %>% 
+  dplyr::select(note_precision, interval_precision, melody_interval_accuracy)
+
+
+save(melody_pca2_data, file = 'melody_pca2_data.rda')
+
+```
+
+
+```{r include = FALSE}
+
+dvs_summarised$pca_melodic_singing_accuracy <- as.numeric(melody_pca2$scores)
+
+```
+
+
+```{r include = FALSE}
+
+M_dvs2 <- dvs_summarised %>%
+  dplyr::select(contains("pca")) %>% 
+  cor(use = 'pairwise.complete.obs')
+
+testRes2 <- dvs_summarised %>%
+  dplyr::select(-c(p_id, test_instance)) %>% 
+  as.matrix() %>% 
+  cor.mtest(conf.level = 0.95)
+
+
+
+corrplot(M_dvs2, 
+         p.mat = testRes2, sig.level = 0.10, order = 'hclust', addrect = 2, method = 'number')
+
+```
+
+
+# Results
+
+## Long note singing
+
+When submitting the long note variables to a parallel analysis, three components were suggested. Consequently, a three-dimensional PCA was fit to the long note data. In the solution, all indicators had a communality (h^2^) value above .75, except for *long_note_var*. This was removed and a second three-dimensional PCA was fitted. In this solution  (see Table 4), all h^2^ values were above .75. Each indicator had a factor loading of at least .5, with each component explaining a cumulative proportion of 30%, 59% and 85%. The first component seemed to represent a general long note accuracy, the second volatility in pitch frequency (i.e., the tendency for the pitch curve to be erratic, rather than stable) and the third, "scooping" or change points to the sung note. Note that *long_note_no_cpts* cross loads onto the accuracy and scooping components. Component scores were extracted for each participant on each of the three latent variables. 
+
+\newpage
+
+```{r, warning = FALSE}
+
+long_note_pca2$loadings %>% 
+  unclass() %>% 
+  as.data.frame() %>% 
+  tibble::rownames_to_column(var = "Variable") %>% 
+  mutate(h2 = long_note_pca2$communality,
+         u2 = long_note_pca2$uniquenesses) %>% 
+    mutate(across(RC1:u2, round, 2)) %>% 
+  papaja::apa_table(caption = "Final principal components analysis solution for long note data.")
+
+
+
+```
+
+```{r include = FALSE}
+
+print(long_note_pca2, cut = 0.3, sort = TRUE) 
+
+```
+
+
+## Melody singing
+
+
+
+```{r include = FALSE}
+
+lm1 <- lmerTest::lmer(opti3 ~ N + step.cont.loc.var + tonalness + log_freq + melody_type + melody_type:d.entropy + (1|p_id), data = dat_only_Berkowitz)
+
+summary(lm1)
+
+MuMIn::r.squaredGLMM(lm1)
+
+```
+
+To assess the relative differences between arhythmic and rhythmic trial types, and hence to decide whether separate models for arhythmic vs. rhythmic trial types are warranted, our first mixed effects model (*Model 1*) modeled all (i.e., arhythmic and rhythmic) data simultaneously. *opti3* was dependent variable, *N* *step.cont.loc.var*, *tonalness*, *log_freq*, *d.entropy*, *melody_type* (arhythmic vs. rhythmic) and the interaction of *melody_type* with *d.entropy* were fixed effects and participant was used as a random intercept effect. In the model (see Table 5), all fixed effect predictors were significant, except the effect of *d.entropy* within the condition of *arhythmic*, which is to be expected, considering that rhythmic variability is not present in arrhythmic melodies. The R^2^m value was .16 and the R^2^c value was .42, suggesting that the model explained a moderately large amount of the variance in the data, with the fixed effects along explaining a small amount of variance in the data. The coefficient of *melody_type* was $B$ = -.15 (*p* < .001), suggesting that rhythmic trials are associated with a higher difficulty. This suggests that arhythmic and rhythmic trials should be modeled separately, by being somewhat categorically different in difficulty.
+
+
+```{r, include = FALSE}
+
+sjPlot::tab_model(lm1, title = "Model 1: Mixed effects model regressing opti3 onto melodic feature variables as fixed effects and participant as random effect, across all melodic stimulus items.")
+
+```
+
+
+```{r}
+
+# knitr::kable(tibble(), caption = "Model 1: Mixed effects model regressing opti3 onto melodic feature variables as fixed effects and participant as random effect.")
+# 
+# knitr::include_graphics('../data/other/Exp2_Table 5.png')
+
+lm1 |>
+papaja::apa_print() |>
+papaja::apa_table(caption = "Model 1: Mixed effects model regressing opti3 onto melodic feature variables as fixed effects and participant as random effect, across all melodic stimulus items.") 
+
+```
+
+
+
+```{r eval = FALSE}
+
+dat_with_min_3_note_events <- dat %>% 
+  filter(no_note_events >= 3)
+
+```
+
+
+
+```{r include = FALSE}
+
+dat_one_attempt_arrhythmic <- dat_only_Berkowitz %>% 
+  dplyr::filter(attempt == 1, melody_type == "arrhythmic") %>% 
+  mutate(opti3 = case_when(opti3 < 0 ~ 0, opti3 > 1 ~ 1, TRUE ~ opti3))
+
+# make sure no opti3s < 0 or > 1
+
+
+lm2 <- lmerTest::lmer(opti3 ~ N + step.cont.loc.var + tonalness + log_freq + d.entropy + i.entropy + (1|p_id), data = dat_one_attempt_arrhythmic)
+
+summary(lm2)
+
+MuMIn::r.squaredGLMM(lm2)
+
+```
+
+
+```{r include = FALSE} 
+
+lm2.2 <- lmerTest::lmer(opti3 ~ N + step.cont.loc.var + tonalness + log_freq + (1|p_id), data = dat_one_attempt_arrhythmic)
+
+summary(lm2.2)
+
+MuMIn::r.squaredGLMM(lm2.2)
+
+```
+
+
+```{r}
+
+save(lm2.2, file = '../data/exp4/output_data/Berkowitz_arrhythmic_mixed_effects_model.rda')
+
+```
+
+```{r warning = FALSE, include = FALSE}
+
+scaled_vars <- dat_one_attempt_arrhythmic %>% 
+  dplyr::select(opti3, N, step.cont.loc.var, tonalness, log_freq, p_id) %>% 
+  mutate(across(opti3:log_freq, scale))
+
+scaled_vars %>% dplyr::select(-p_id) %>% itembankr::hist_item_bank()
+
+lm2.2_scaled <- lmerTest::lmer(opti3 ~ N + step.cont.loc.var + tonalness + log_freq + (1|p_id), data = scaled_vars)
+
+save(lm2.2_scaled, file = '../data/exp4/output_data/Berkowitz_arrhythmic_mixed_effects_model_scaled.rda')
+
+```
+
+```{r include = FALSE}
+
+lm_arrhythmic_length_only <- lmerTest::lmer(opti3 ~ N + (1|p_id), data = dat_one_attempt_arrhythmic)
+
+summary(lm_arrhythmic_length_only)
+
+MuMIn::r.squaredGLMM(lm_arrhythmic_length_only)
+
+save(lm_arrhythmic_length_only, file = '../data/exp4/output_data/lm_arrhythmic_length_only.rda')
+
+```
+
+
+
+
+```{r include = FALSE}
+
+# fit the model
+lm_arrhythmic_length_only <- lmerTest::lmer(opti3 ~ N + (1|p_id), data = dat_one_attempt_arrhythmic)
+
+save(lm_arrhythmic_length_only, file = '../data/exp4/output_data/lm_arrhythmic_length_only.rda')
+
+# grab p_ids
+p_ids <- dat_one_attempt_arrhythmic %>% 
+  pull(p_id) %>% 
+  unique()
+
+# small version df for quick sampling
+
+sml <- dat_one_attempt_arrhythmic %>% 
+  dplyr::select(p_id, opti3, N)
+
+# sample random participant 
+smp <- sml %>% filter(p_id == sample(p_ids, 1), !is.na(opti3))
+
+# get the sd of the model
+sigma <- VarCorr(lm_arrhythmic_length_only) %>% 
+  as.data.frame() %>% 
+  filter(grp == "p_id") %>% 
+  pull(sdcor)
+
+# get the coefficient for N from the model
+N_coef <- as.vector(fixef(lm_arrhythmic_length_only)['N'])
+N_intercept <- as.vector(fixef(lm_arrhythmic_length_only)['(Intercept)'])
+
+
+
+# for the participant sample, get the empirical opti3 and item difficulty (N) values
+N_empirical <- smp$N 
+y <- smp$opti3
+
+# define the likelihood function
+ll_lm <- function(par, N_empirical, y){
+  
+  alpha <- par[1] # we only need to optimise for the participant intercept
+
+  R <- y - alpha - N_coef * N_empirical
+  
+  -sum(dnorm(R, mean = 0, sigma, log = TRUE) + # likelihood
+       dnorm(alpha, mean = 0, sd = sigma, log = TRUE)) # prior
+  
+}
+
+ability_length_preds <- ranef(lm_arrhythmic_length_only)$p_id[, '(Intercept)']
+
+p_abilities <- ranef(lm_arrhythmic_length_only)$p_id %>% 
+  tibble::rownames_to_column(var = "p_id")
+
+sml <- sml %>% 
+  mutate(p_id = as.character(p_id)) %>% 
+  left_join(p_abilities, by = "p_id")
+
+
+# optimise
+mle_par <- optim(fn = ll_lm,                
+                 par = c(alpha = 0), # start with the mean of 0
+                 N_empirical = 3,
+                 y = 0.3025,
+                 method = "Brent", 
+                 lower = min(ability_length_preds), 
+                 upper = max(ability_length_preds))
+
+as.vector(mle_par$par)
+
+```
+
+```{r}
+
+bayes_modal_estimation_N_model <- function(par, N_empirical, y, N_coef, N_intercept){
+
+  alpha <- par[1] # we only need to optimise for the participant intercept
+
+  R <- y - alpha - N_intercept - N_coef * N_empirical
+  
+  -sum(dnorm(R, mean = 0, sd = sigma, log = TRUE) + # likelihood
+       dnorm(alpha, mean = 0, sd = sigma, log = TRUE)) # prior
+    
+}
+
+
+
+# wrap in function
+
+compute_new_ranef <- function(N_empirical, y, N_coef, N_intercept, min, max) {
+
+
+  mle_par <- optim(fn = bayes_modal_estimation_N_model,
+                   par = c(alpha = 0), # start with the mean of 0
+                   N_empirical = N_empirical,
+                   N_coef = N_coef,
+                   N_intercept = N_intercept,
+                   y = y,
+                   method = "Brent", 
+                 lower = min, 
+                 upper = max)
+
+  as.vector(mle_par$par)
+}
+
+
+
+```
+
+
+```{r}
+
+remove_participant_and_recompute_model <- function(pid) {
+
+  tryCatch({
+    
+    # method 1: fit "new" data with completely new model
+    m <- lmerTest::lmer(opti3 ~ N + (1|p_id), data = sml)
+
+    p_complete_model <- as_tibble(ranef(m)) %>%
+      filter(grp == pid) %>%
+      pull(condval)
+    
+    # method 2: 
+    dat_wo <- sml %>% filter(p_id != pid)
+    m_wo <- lmerTest::lmer(opti3 ~ N + (1|p_id), data = dat_wo)
+
+    N_coef <- as.vector(fixef(m_wo)['N'])
+    N_intercept <- as.vector(fixef(lm_arrhythmic_length_only)['(Intercept)'])
+
+    new_p <- sml %>% 
+      filter(p_id == pid, !is.na(opti3)) # remove trials with na
+      
+    ability_length_preds <- ranef(m_wo)$p_id[, '(Intercept)']
+    
+    min_ability <- min(ability_length_preds)
+    max_ability <- max(ability_length_preds)
+    
+    pred_ranef <- compute_new_ranef(
+      N_empirical = new_p$N,
+      y =  new_p$opti3,
+      N_coef = N_coef,
+      N_intercept = N_intercept,
+      min = min_ability,
+      max = max_ability)
+    
+    tibble(p_id = pid,
+           p_recompute_full_model = p_complete_model,
+           pred_ranef = pred_ranef, 
+           N_coef = N_coef)
+
+  }, error = function(err) {
+    tibble(p_recompute_full_model = NA,
+           pred_ranef = NA,
+           N_coef = NA)
+  }, warning = function(warning) {
+    tibble(p_recompute_full_model = NA,
+           pred_ranef = NA,
+           N_coef = NA)
+  })
+
+}
+
+```
+
+
+```{r}
+
+random_intercept_exp <- map_dfr(p_ids, remove_participant_and_recompute_model)
+
+```
+
+
+```{r}
+
+take_diff <- function(x, y) {
+  min <- min(c(x, y))
+  max <- max(c(x, y))
+  max - min
+}
+
+```
+
+```{r}
+
+random_intercept_exp <- random_intercept_exp %>% 
+  rowwise() %>% 
+  mutate(abs_diff = take_diff(p_recompute_full_model, pred_ranef)) %>% 
+  ungroup()
+
+```
+
+```{r include = FALSE}
+
+cor(random_intercept_exp$p_recompute_full_model, 
+    random_intercept_exp$pred_ranef, use = 'pairwise.complete.obs')
+
+```
+
+
+```{r include = FALSE}
+
+random_intercept_exp %>% 
+  dplyr::select(p_recompute_full_model, pred_ranef) %>% 
+  pivot_longer(everything()) %>% 
+  ggplot() +
+    geom_histogram(aes(x = value)) +
+    facet_wrap(~name, scales = "free")
+
+```
+
+
+
+
+
+```{r}
+
+
+
+bayes_modal_estimation_arrhythmic_model <- function(par, 
+                                           y,
+                                           fixed_effect_intercept,
+                                           N = list(empirical = NA,
+                                                    coef = NA),
+                                           step.cont.loc.var = list(empirical = NA,
+                                                                    coef = NA),
+                                           tonalness = list(empirical = NA,
+                                                            coef = NA),
+                                           log_freq = list(empirical = NA,
+                                                          coef = NA)) {
+  
+  #  N + step.cont.loc.var + tonalness + log_freq
+
+  alpha <- par[1] # we only need to optimise for the participant intercept
+
+  R <- y - alpha - fixed_effect_intercept - 
+                  N$coef * N$empirical - 
+                  step.cont.loc.var$coef * step.cont.loc.var$empirical - 
+                  tonalness$coef * tonalness$empirical - 
+                  log_freq$coef * log_freq$empirical
+  
+  -sum(dnorm(R, mean = 0, sd = sigma, log = TRUE) + # likelihood
+       dnorm(alpha, mean = 0, sd = sigma, log = TRUE)) # prior
+    
+}
+
+
+
+compute_new_ranef_full_model <- function(y, 
+                                         N, 
+                                         step.cont.loc.var, 
+                                         tonalness, 
+                                         log_freq, 
+                                         min, 
+                                         max,
+                                         fixed_effect_intercept) {
+
+
+  mle_par <- optim(fn = bayes_modal_estimation_arrhythmic_model,
+                   par = c(alpha = 0), # start with the mean of 0
+                   N = N,
+                   step.cont.loc.var = step.cont.loc.var, 
+                   tonalness = tonalness, 
+                   log_freq = log_freq,
+                   y = y,
+                   fixed_effect_intercept = fixed_effect_intercept,
+                   method = "Brent", 
+                 lower = min, 
+                 upper = max)
+
+  as.vector(mle_par$par)
+}
+
+```
+
+
+```{r}
+
+sml_arr_full <- dat_one_attempt_arrhythmic %>% 
+  dplyr::select(p_id, N, step.cont.loc.var, tonalness, log_freq, opti3)
+
+smp_full <-  sml_arr_full %>% 
+  filter(p_id == sample(p_ids, 1))
+
+```
+
+
+```{r}
+
+get_fixed_effect_param <- function(param, model) {
+  as.vector(fixef(model)[param])
+}
+
+```
+
+```{r}
+
+ability_preds <- ranef(lm2.2)$p_id[, '(Intercept)']
+
+min_ability <- min(ability_preds)
+max_ability <- max(ability_preds)
+
+```
+
+
+```{r include = FALSE}
+  
+ttt <- compute_new_ranef_full_model(y, 
+                             fixed_effect_intercept = get_fixed_effect_param('(Intercept)', lm2.2),
+                             N = list(empirical = smp_full$N,
+                                      coef = get_fixed_effect_param('N', lm2.2)),
+                               step.cont.loc.var = list(
+                                      empirical = smp_full$step.cont.loc.var,
+                                        coef = get_fixed_effect_param('step.cont.loc.var', lm2.2)),
+                               tonalness = list(empirical = smp_full$tonalness,
+                                                coef = get_fixed_effect_param('tonalness', lm2.2)),
+                               log_freq = list(empirical = smp_full$log_freq,
+                                                coef = get_fixed_effect_param('log_freq', lm2.2)),
+                             min = min_ability,
+                             max = max_ability)
+
+
+ttt
+
+```
+
+
+
+
+```{r}
+
+remove_participant_and_recompute_model_full <- function(pid) {
+
+  tryCatch({
+    
+    # method 1: fit "new" data with completely new model
+    m <- lmerTest::lmer(opti3 ~ N + step.cont.loc.var + tonalness + log_freq + (1|p_id), data = sml_arr_full)
+
+    p_complete_model <- as_tibble(ranef(m)) %>%
+      filter(grp == pid) %>%
+      pull(condval)
+    
+    # method 2: 
+    dat_wo <- sml_arr_full %>% filter(p_id != pid)
+    m_wo <- lmerTest::lmer(opti3 ~ N + step.cont.loc.var + tonalness + log_freq + (1|p_id), data = dat_wo)
+
+    new_p <- sml_arr_full %>% 
+      filter(p_id == pid, !is.na(opti3)) # remove trials with na
+      
+    ability_length_preds <- ranef(m_wo)$p_id[, '(Intercept)']
+    
+    min_ability <- min(ability_length_preds)
+    max_ability <- max(ability_length_preds)
+    
+    pred_ranef <- compute_new_ranef_full_model(y = new_p$opti3, 
+                             fixed_effect_intercept = get_fixed_effect_param('(Intercept)', m_wo),
+                             N = list(empirical = new_p$N,
+                                      coef = get_fixed_effect_param('N', m_wo)),
+                               step.cont.loc.var = list(
+                                          empirical = new_p$step.cont.loc.var,
+                                          coef = get_fixed_effect_param('step.cont.loc.var', m_wo)),
+                               tonalness = list(empirical = new_p$tonalness,
+                                                coef = get_fixed_effect_param('tonalness', m_wo)),
+                               log_freq = list(empirical = new_p$log_freq,
+                                                coef = get_fixed_effect_param('log_freq', m_wo)),
+                             min = min_ability,
+                             max = max_ability)
+    
+    tibble(p_id = pid,
+           p_recompute_full_model = p_complete_model,
+           pred_ranef = pred_ranef)
+
+  }, error = function(err) {
+    print('error')
+    print(err)
+    tibble(p_recompute_full_model = NA, pred_ranef = NA)
+  }, warning = function(warning) {
+    print('warning')
+    print(warning)
+    tibble(p_recompute_full_model = NA, pred_ranef = NA)
+  })
+
+}
+
+```
+
+
+```{r}
+
+random_intercept_exp_full <- map_dfr(p_ids, remove_participant_and_recompute_model_full)
+
+```
+
+
+
+
+```{r}
+
+random_intercept_exp_full <- random_intercept_exp_full %>% 
+  rowwise() %>% 
+  mutate(abs_diff = take_diff(p_recompute_full_model, pred_ranef)) %>% 
+  ungroup()
+
+```
+
+```{r include = FALSE}
+
+cor(random_intercept_exp_full$p_recompute_full_model, 
+    random_intercept_exp_full$pred_ranef, use = 'pairwise.complete.obs')
+
+```
+
+
+```{r include = FALSE}
+
+random_intercept_exp_full %>% 
+  dplyr::select(p_recompute_full_model, pred_ranef) %>% 
+  pivot_longer(everything()) %>% 
+  ggplot() +
+    geom_histogram(aes(x = value)) +
+    facet_wrap(~name, scales = "free")
+
+```
+
+
+
+```{r}
+
+cmp <- function() {
+  
+  tryCatch({
+    
+    smp <- sml %>% 
+      filter(p_id == sample(p_ids, 1), !is.na(opti3))
+    
+    smp[smp < 0] <- 0
+    smp[smp > 1] <- 1
+    
+    x <- smp$opti3 # set of observations
+    
+    print(x)
+    
+    ml_est <- beta.mle(x)
+    
+    print('ml est::')
+    ml_est$param
+    
+    bx <- seq(0,1,length=100)
+    db <- dbeta(bx, as.numeric(ml_est$param['alpha']), as.numeric(ml_est$param['beta']))
+    
+    
+    t <- tibble(opti3 = x,
+                idx = 1:length(opti3))
+    
+    
+    p <- ggplot() +
+      geom_histogram(aes(x = opti3), data = t) +
+      geom_line(aes(bx,db))
+    
+    print(p)
+    
+    bx[which.max(db)]
+    
+  }, error = function(err) {
+    print(err)
+    # predict the mean
+    mu
+  })
+}
+
+```
+
+
+
+
+```{r include = FALSE}
+
+dat_one_attempt_rhythmic <- dat_only_Berkowitz %>% 
+  filter(attempt == 1, melody_type == "rhythmic")
+
+lm3 <- lmerTest::lmer(opti3 ~ N + step.cont.loc.var + tonalness + log_freq + d.entropy + i.entropy + (1|p_id), data = dat_one_attempt_rhythmic)
+
+summary(lm3)
+
+MuMIn::r.squaredGLMM(lm3)
+
+```
+
+```{r include = FALSE}
+
+lm3.2 <- lmerTest::lmer(opti3 ~ N + step.cont.loc.var + log_freq + d.entropy + i.entropy + (1|p_id), data = dat_one_attempt_rhythmic)
+
+summary(lm3.2)
+
+MuMIn::r.squaredGLMM(lm3.2)
+
+```
+
+```{r}
+
+save(lm2.2, file = '../data/exp4/output_data/Berkowitz_arrhythmic_mixed_effects_model.rda')
+
+save(lm3.2, file = '../data/exp4/output_data/Berkowitz_rhythmic_mixed_effects_model.rda')
+
+
+```
+
+
+
+
+
+```{r}
+
+exp4_dem_small <- exp4_demographics %>% 
+  dplyr::select(UserId, Age, Gender) %>% 
+  rename(p_id = UserId) %>% 
+  unique()
+
+dat <- dat %>% left_join(exp4_dem_small, by = "p_id")
+
+```
+
+
+```{r}
+
+dvs_summarised_narrow <- dvs_summarised %>% 
+  dplyr::select(c(melody_note_accuracy, long_note_var, p_id, test_instance, contains("pca")))
+
+```
+
+
+```{r}
+
+exp_4_lm1_ranef <- ranef(lm1)$p_id %>% 
+  tibble::rownames_to_column(var = "p_id") %>% 
+  dplyr::rename(`SAA_Ability` = `(Intercept)`) %>% 
+  mutate(p_id = as.numeric(p_id))
+
+exp_4_lm2.2_ranef <- ranef(lm2.2)$p_id %>% 
+  tibble::rownames_to_column(var = "p_id") %>% 
+  dplyr::rename(`SAA_Ability_Arrhythmic` = `(Intercept)`) %>% 
+  mutate(p_id = as.numeric(p_id))
+
+exp_4_lm3.2_ranef <- ranef(lm3.2)$p_id %>% 
+  tibble::rownames_to_column(var = "p_id") %>% 
+  dplyr::rename(`SAA_Ability_Rhythmic` = `(Intercept)`) %>% 
+  mutate(p_id = as.numeric(p_id))
+
+dat <- dat %>% left_join(exp_4_lm1_ranef, by = "p_id") %>% 
+  left_join(exp_4_lm2.2_ranef, by = "p_id") %>% 
+  left_join(exp_4_lm3.2_ranef, by = "p_id")
+  
+
+```
+
+
+
+```{r, warning = FALSE}
+  
+higher_level_mod_vars <- dat %>% 
+  dplyr::select(p_id, test_instance, `Musical Training`, `Singing Abilities`, Age, 
+         SAA_Ability, SAA_Ability_Arrhythmic, SAA_Ability_Rhythmic,
+         Gender, microphone_type, hardwareConcurrency, deviceMemory) %>% 
+  unique() %>% 
+  left_join(dvs_summarised_narrow, by = c('p_id', 'test_instance')) %>% 
+  dplyr::mutate(dplyr::across(where(is.numeric), round, 2))
+
+```
+
+
+```{r include = FALSE}
+
+higher_level_mod_vars %>% 
+  dplyr::select(contains("SAA")) %>% 
+  corr.test()
+
+```
+
+```{r include = FALSE}
+
+
+testRes_hl <- higher_level_mod_vars %>%
+  select(-c(p_id, test_instance, Gender, microphone_type)) %>% 
+  as.matrix(use = 'pairwise.complete.obs') %>% 
+  cor.mtest(conf.level = 0.95)
+
+
+higher_level_mod_vars %>%
+  select(-c(p_id, test_instance, Gender, microphone_type)) %>% 
+  as.matrix() %>% 
+  cor(use = 'pairwise.complete.obs') %>% 
+  corrplot(p.mat = testRes_hl, 
+         sig.level = 0.10, 
+         order = 'hclust', 
+         addrect = 2, 
+         method = 'number',
+         type = 'upper')
+
+```
+
+
+```{r include = FALSE}
+
+# overall score?
+
+overall_score_vars <- higher_level_mod_vars %>% 
+  select(
+    SAA_Ability_Arrhythmic, SAA_Ability_Rhythmic,
+    contains("pca"),
+    long_note_var, # didn't end up in a pca
+    melody_note_accuracy # also did not
+  ) %>% 
+  mutate(
+    Final_SAA_Score = .33 * SAA_Ability_Arrhythmic + .33 * SAA_Ability_Rhythmic + .33 * (.33 * pca_long_note_volatility + .33 * pca_long_note_scoop + .33 * pca_long_note_accuracy))
+
+
+# SAA_final_percentile <- ecdf(overall_score_vars$Final_SAA_Score)
+# SAA_final_percentile(seq(from = -0.4, to = 0.4, by = 0.05)) %>% round(2) %>% scales::percent()
+
+
+```
+
+
+
+
+
+Next, a similar model (*Model 2.1*) was specified, but only for arhythmic trials, and hence, the *melody_type* (arhythmic vs rhythmic) factor was not included. *d.entropy* and *i.entropy* were not significant predictors and were removed. In the resulting arhythmic model (*Model 2.2*), *N*, *step.cont.loc.var*, *tonalness* and *log_freq* were significant. The R^2^c was .38 and the R^2^m was .11. See Table 6.
+
+\newpage
+
+
+```{r include = FALSE}
+
+sjPlot::tab_model(lm2.2, title = "Table 6: Mixed effects model regressing opti3 onto melodic feature variables as fixed effects and participant as random effect, with only arhythmic trials.")
+
+```
+
+```{r}
+
+# knitr::kable(tibble::tibble(),
+#              caption = "Model 2.2: Mixed effects model regressing opti3 onto melodic feature variables as fixed effects and participant as random effect, with only arhythmic trials.")
+# 
+# knitr::include_graphics('../data/other/Exp2_Table 6.png')
+
+lm2.2 |>
+papaja::apa_print() |>
+papaja::apa_table(caption = "Model 2.2: Mixed effects model regressing opti3 onto melodic feature variables as fixed effects and participant as random effect, with only arhythmic trials.") 
+
+
+```
+
+The same process was undertaken to model only rhythmic melody trials. In the resulting model (*Model 3.2*), *N*, *step.cont.loc.var*, *log_freq*, *d.entropy* and *i.entropy* were significant predictors. The R^2^c was .42 and the R^2^m was .13.  See Table 7.
+
+```{r, include = FALSE}
+
+sjPlot::tab_model(lm3.2, title = "Table 7: Mixed effects model regressing opti3 onto melodic feature variables as fixed effects and participant as random effect, with only rhythmic trials.")
+
+```
+
+```{r}
+
+# knitr::kable(tibble::tibble(),
+#              caption = "Model 3.2: Mixed effects model regressing opti3 onto melodic feature variables as fixed effects and participant as random effect, with only rhythmic trials.")
+# 
+# knitr::include_graphics('../data/other/Exp2_Table 7.png')
+
+
+lm3.2 |>
+papaja::apa_print() |>
+papaja::apa_table(caption = "Model 3.2: Mixed effects model regressing opti3 onto melodic feature variables as fixed effects and participant as random effect, with only rhythmic trials.") 
+
+
+```
+
+
+Random effects coefficients for participant were extracted from the three different models, which had 1) *melody_type* (arhythmic vs. rhythmic) as a fixed effects predictor, as well as the resulting 2) arhythmic vs 3) rhythmic models. These were taken to represent three distinct ability scores (*SAA_Ability*, *SAA_Ability_Arrhythmic* and *SAA_Ability_Rhythmic*). Note that the *SAA_Ability* score is modeled on the same data as the *SAA_Ability_Arrhythmic* and *SAA_Ability_Rhythmic* ability scores, but modelling the data they were built with simultaneously.
+
+The models constructed above can be used to compute item difficulty scores for any melody in the Berkowitz corpus. This allows the creation of an adaptive (and hence efficient) test via the *R* package *psychTestRCAT*, which re-estimates participant ability after each trial, based on the current item's difficulty value. We computed difficulty values for all items in the Berkowitz corpus of melodies, which is released as a separate item bank in the Berkowitz package^[https://github.com/sebsilas/Berkowitz]. These difficulty values are essentially a model prediction (where *opti3* is the dependent variable), given the fixed effects values for each melody in the corpus (i.e., it is an output of the sum of the fixed effects values for each melody, weighted by the fixed effects coefficients described in this paper).
+
+## Principal components analysis of established measures of melody singing accuracy
+
+The variables *note accuracy*, *note precision*, *interval accuracy* and *interval precision* were submitted to a unidimensional PCA. In the solution, all indicators were at a communality (h^2^) value above .30, except for *melody_note_accuracy*. This was removed and, in the final solution (see Table 8), note precision, interval precision and melody interval accuracy had factor loadings above .50 and h^2^ values above .4. The single factor achieved to explain 51% of variance in the data. Components scores were extracted from this model and we called the new aggregate variable *pca_melodic_singing_accuracy*.
+
+\newpage
+
+```{r, warning = FALSE}
+
+melody_pca2$loadings %>% 
+  unclass() %>% 
+  as.data.frame() %>% 
+  tibble::rownames_to_column(var = "Variable") %>% 
+  mutate(h2 = melody_pca2$communality,
+         u2 = melody_pca2$uniquenesses) %>% 
+    mutate(across(PC1:u2, round, 2)) %>% 
+  papaja::apa_table(caption = "Final principal components analysis solution for melody singing accuracy data.")
+
+
+
+```
+
+
+
+
+
+
+```{r include = FALSE}
+
+higher_level_mod <- lm(SAA_Ability ~ 
+                         # individual diffs
+                         `Musical Training` + Age + Gender + 
+                         # long note/low-level
+                         pca_long_note_volatility + 
+                         pca_long_note_accuracy + 
+                         pca_long_note_scoop + 
+                         long_note_var +
+                         # melodic singing
+                         pca_melodic_singing_accuracy +
+                         melody_note_accuracy, data = higher_level_mod_vars)
+
+summary(higher_level_mod)
+
+```
+
+```{r include = FALSE, warning = FALSE}
+
+# pull out microphone_type, pca_long_note_volatility, pca_long_note_scoop, long_note_var
+
+higher_level_mod2 <- lm(SAA_Ability ~ 
+                         # individual diffs
+                         `Musical Training` + Age + Gender + 
+                         # long note/low-level
+                         pca_long_note_accuracy + 
+                         # melodic singing
+                         pca_melodic_singing_accuracy +
+                         melody_note_accuracy, data = higher_level_mod_vars)
+
+summary(higher_level_mod2)
+
+# standardize because of small beta estimates
+higher_level_mod2_std <- higher_level_mod_vars %>% 
+  dplyr::summarise(across(where(is.numeric), scales::rescale)) %>% 
+  cbind(higher_level_mod_vars %>% select(Gender)) %>% 
+  lm(SAA_Ability ~ 
+       # individual diffs
+       `Musical Training` + Age + Gender + 
+       # long note/low-level
+       pca_long_note_accuracy + 
+       # melodic singing
+       pca_melodic_singing_accuracy +
+       melody_note_accuracy, data = .)
+
+summary(higher_level_mod2_std)
+
+```
+
+
+
+## Higher level modelling
+
+The correlations among the continuous variables are shown in Table 9. As shown, there are a range of correlation magnitudes from null to moderate, which tend to vary by group: the self-report questionnaires have a moderate correlation with one another, but only small or no correlations with other variables; the three *SAA* scores we derived from the models constructed from rhythmic, arhythmic and all models have large correlations with one another. In summary, the table shows that most variables are related to some degree, but there is no multicollinearity, suggesting a good balance of convergent vs. divergent validity.
+
+```{r, include = FALSE}
+
+# Are the vars normal?
+
+higher_level_mod_vars %>% 
+  select(-c(p_id, test_instance, Gender, microphone_type)) %>% 
+  itembankr::hist_item_bank()
+
+
+```
+
+\newpage
+
+```{r}
+
+# f <- get('flex_cor', asNamespace("corx"))
+# debug(f)
+
+exp2_cor_table <- higher_level_mod_vars %>% 
+  dplyr::select(-c(p_id, test_instance, Gender, microphone_type, Age, long_note_var, melody_note_accuracy)) %>% 
+  dplyr::rename('Self-reported Musical Training' = 'Musical Training',
+         'Self-reported Singing Abilities' = 'Singing Abilities') %>% 
+  as.data.frame() %>% 
+          corx::corx(
+            triangle = "lower",
+          stars = c(0.05, 0.01, 0.001),
+          describe = c(`$M$` = mean, `$SD$` = sd),
+          p_adjust = "holm")
+
+
+
+tmp_tab <- exp2_cor_table$apa
+
+tmp_tab[tmp_tab == " - "] <- " "
+
+
+papaja::apa_table(tmp_tab, # apa contains the data.frame needed for apa_table
+                  caption = "Pearson's correlations of dependent variables in Experiment 2 (Holm's corrected)",
+                  note = "* p < 0.05; ** p < 0.01; *** p < 0.001",
+                  escape = FALSE)
+
+
+```
+
+In the higher level multiple regression model with the main *SAA_Ability_Score* (i.e., derived from rhythmic and arhythmic melody simultaneously) as dependent variable, the demographic variables *Musical Training*, *Age* and *Gender*, the long note singing variables *pca_long_note_volatility*, *pca_long_note_accuracy*, *pca_long_note_scoop* were used as predictors as well as the variables that were excluded from the PCA models, namely *pca_long_note_randomness*, *pca_long_note_scoop*, *long_note_var*  and *melody_note_accuracy*. The predictors *pca_long_note_volatility*, *pca_long_note_scoop* and *long_note_var* made no significant contribution to the model and were therefore removed as predictors. The final model had an R^2^ value of .38 (adjusted R^2^ = .37), *p* < .001, and is shown in Table 10.
+
+
+```{r warning = FALSE, include = FALSE}
+
+higher_level_mod2_std %>% 
+  sjPlot::tab_model()
+
+```
+
+
+```{r}
+
+# knitr::kable(tibble(), caption = "Regression model with the SAA score as dependent variable and lower-level singing variables as predictors. Variables were standardised before model fitting to make small unstandardised beta estimates more interpretable.")
+# 
+# knitr::include_graphics('../data/other/Exp2_Table 10.png')
+
+higher_level_mod2_std |>
+papaja::apa_print() |>
+papaja::apa_table(caption = "Regression model with the SAA score as dependent variable and lower-level singing variables as predictors. Variables were standardised before model fitting to make small unstandardised beta estimates more interpretable.") 
+
+```
+
+
+The size and direction of the coefficients are in line with expectations, considering that some of the singing accuracy scores (e.g., *pca_melodic_singing_accuracy*) reflect error (i.e., a smaller error score can predict a better *SAA_Ability_Score*).
+
+
+# Discussion
+
+The main objective of Experiment 2 was to implement the beginning steps of creating an adaptive singing test. Firstly, this required giving the static test developed in Experiment 1 new features, which for example, compute results (from fundamental frequency and note onset information through to psychometric scores) on-the-fly.
+
+We also formally modelled the long note data, which suggested that there are different aspects of single-note singing ability which can be reflected in the data. These features seem to represent general accuracy, the level of volatility and the scoop or number of changes in the fundamental frequency pitch curve. For melody singing trials, we updated the paradigm from the so-called rehearsal paradigm to the new one-shot paradigm. This later paradigm produces cleaner data and is generally easier to work with, since it produces one iteration of a sung recall per audio recording. For this paradigm, we chose *opti3* [@mullensiefenCognitiveAdequacyMeasurement2004], a measure of melodic similarity, as the main dependent variable. We view *opti3* scores as measures of an overall melodic recall ability which reflects both melodic memory accuracy and singing accuracy. Use of the one-shot paradigm allowed us to separate multiple attempts at the same item into distinct audio files. However, it was observed that only a small proportion of participants were willing to optionally expend the extra effort to take multiple attempts. This effect of effort is a problem for all performance research [@silmRelationshipPerformanceTesttaking2020], but is particularly difficult or impossible to control in the context of an online experiment. This suggests that researchers should be careful overextrapolating from results collected online, but also demonstrates the need to minimise test lengths where possible (e.g., through adaptive testing).
+
+As a means of determining divergent and construct validity, we compared model outputs built with *opti3* with other related measures such as self-reported musical training, and additionally, implemented several melody singing accuracy measures described in the previous literature [@pfordresherImpreciseSingingWidespread2010]. Small statistically significant positive correlations with self-reported singing accuracy and musical training are in line with expectations. As expected, certain objective indicators of singing accuracy seem to predict a portion of the variance in *opti3* scores. The established melodic singing accuracy measure variables in our regression model had substantial ($\beta_{pca\_melodic\_singing\_accuracy} = -0.51$, *p* < .001; $\beta_{melody\_note\_accuracy} = 0.23$, *p* < .001) standardised magnitudes^[Note: negative coefficients appear when the measure appears to represent deviation from a target i.e., higher score = more error.], suggesting that low-level singing accuracy is predictive of the overall *opti3* construct, which we suggest represents variance in melodic memory also. The standardised coefficient on *pca_long_note_accuracy* was even smaller ($\beta_{pca\_long\_note\_accuracy} = -0.15$, *p* < .001), suggesting that even the ability to sing distinct stable tones is a factor in overall sung recall. However, these measures are not highly related or colinear, suggesting that some proportion of variance may be to do with melodic memory, beyond singing accuracy.
+
+Broadly speaking, the results in Experiment 2 suggest that long note singing and melodic singing are somewhat differentiated, as indicated by the PCA models, suggesting they are relatively distinct tasks. This is most likely because long note singing does not involve sophisticated mental templates of melodic structure and is more about fine-grained pitch production monitoring. In other words, long note singing depends more on simple low-level perceptual processes and less on high-level learned representations.
+
+
+Lastly, certain demographic features were related to the overall *SAA_Ability_Score*:  $\beta_{Musical Training} = 0.07$ (*p* < .001); $\beta_{Age} = -.05$ (*p* = .02); $\beta_{GenderMale} = -.03$ (*p* < .001), but with relatively small effects, such that: more musical training predicts better *SAA* ability, a lower age predicts a better *SAA_Ability_Score*, and women performed better than men. The latter two effects are particularly small and could be to do with idiosyncrasies in the sampling panel we used, so we do not extrapolate too much from them.
+
+A next step for obtaining reliability and validity of our analysis procedure is to compare the automated *pYIN* transcription of sung recall and subsequent *opti3* scoring results to those produced when using transcriptions by a professional human rater, on the same data. We have conducted such an experiment, but it is beyond the scope of the present paper and will instead be presented in a forthcoming publication. However, preliminary results show that the mean edit distance accuracy between the *pYIN* output with default parameters settings and professional human transcription was 65%, but improved to an edit distance accuracy of 73% after optimizing the *pYIN* parameters (see @mullensiefenModellingExpertsNotions2007 for a description of edit distance applied to musical data). This suggests the automated transcription procedure is not perfect, but also corresponds largely to human professional transcription. 
+
+Additionally, we showed that participants' hardware features are related to sung recall performance. Note that this does not prove a causality: there are at least two opposing causal explanations. For example: i) a poorer hardware setup decreases sung recall performance through creating latency/test presentation issues which interferes with the participant's performance vs. ii) those with higher socioeconomic status can afford better hardware setups and coincidentally have more training/higher cognitive abilities. These possibilities can both be simultaneously true and contribute to the relationship and must be explored more in future research. However, as far as we are aware, we are the first to document such a relationship in internet singing research.
+
+To create a prototype computerised adaptive test based on psychometric scoring, we constructed mixed effects models separately for performance on rhythmic and arhythmic items, where the *opti3* measure of melodic similarity was the dependent variable. By using statistical predictions  from these models for all items in the item bank (i.e., including those that were not empirically tested), we were able to yield values which can represent difficulty, for each item.
+
+
+```{r}
+
+tibble::tibble(so_id = unique(dat$p_id)) %>% 
+  readr::write_csv(file = "so_ids.csv")
+
+```
+
+

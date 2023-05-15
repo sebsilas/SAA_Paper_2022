@@ -1,0 +1,16 @@
+.Rproj.user
+.Rhistory
+.RData
+.Ruserdata
+analysis/legacy
+data/exp2
+data/exp3
+data/other
+*.wav
+data/exp2/SungRecalls_Transcriptions/
+data/exp2/SungRecalls_Transcriptions2/
+.DS_Store
+data/exp4/final_results_from_sonscience_project/sonscience_melodic_recall_audio
+data/exp4/final_results_from_sonscience_project/sonscience_melodic_recall_audio_long_note
+PERSONAL_README.Rmd
+.RDataTmp
