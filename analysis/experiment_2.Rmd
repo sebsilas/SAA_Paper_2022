@@ -1290,13 +1290,13 @@ melody_pca2 <- dvs_summarised %>%
 
 print(melody_pca2, cut = 0.3, order = TRUE)
 
-save(melody_pca2, file = 'melody_pca2.rda')
+save(melody_pca2, file = '../data/exp4/output_data/melody_pca2.rda')
 
 melody_pca2_data <- dvs_summarised %>% 
   dplyr::select(note_precision, interval_precision, melody_interval_accuracy)
 
 
-save(melody_pca2_data, file = 'melody_pca2_data.rda')
+save(melody_pca2_data, file = '../data/exp4/output_data/melody_pca2_data.rda')
 
 ```
 
@@ -2319,7 +2319,7 @@ Additionally, we showed that participants' hardware features are related to sung
 To create a prototype computerised adaptive test based on psychometric scoring, we constructed mixed effects models separately for performance on rhythmic and arhythmic items, where the *opti3* measure of melodic similarity was the dependent variable. By using statistical predictions  from these models for all items in the item bank (i.e., including those that were not empirically tested), we were able to yield values which can represent difficulty, for each item.
 
 
-```{r}
+```{r, eval = FALSE}
 
 tibble::tibble(so_id = unique(dat$p_id)) %>% 
   readr::write_csv(file = "so_ids.csv")
