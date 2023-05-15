@@ -6,6 +6,7 @@ analysis/legacy
 data/exp2
 data/exp3
 data/other
+data/legacy
 *.wav
 data/exp2/SungRecalls_Transcriptions/
 data/exp2/SungRecalls_Transcriptions2/
@@ -14,3 +15,5 @@ data/exp4/final_results_from_sonscience_project/sonscience_melodic_recall_audio
 data/exp4/final_results_from_sonscience_project/sonscience_melodic_recall_audio_long_note
 PERSONAL_README.Rmd
 .RDataTmp
+~$A_Manuscript_SAA_Paper_BRM.docx
+~$M_ResponseToReviewers_DM.docx
