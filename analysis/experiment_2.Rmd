@@ -331,15 +331,15 @@ midi.gamut.max <- 108
 
 ```{r }
 
-one_attempt_arrhythmic_files <- list.files('../data/exp4/final_results_from_sonscience_project/one_attempt_arrhythmic', pattern = 'complete=true', full.names = TRUE)
+one_attempt_arrhythmic_files <- list.files('../data/exp2/final_results_from_sonscience_project/one_attempt_arrhythmic', pattern = 'complete=true', full.names = TRUE)
 
-one_attempt_rhythmic_files <- list.files('../data/exp4/final_results_from_sonscience_project/one_attempt_rhythmic', pattern = 'complete=true', full.names = TRUE)
-
-
-multi_attempt_arrhythmic_files <- list.files('../data/exp4/final_results_from_sonscience_project/multi_attempt_arrhythmic', pattern = 'complete=true', full.names = TRUE)
+one_attempt_rhythmic_files <- list.files('../data/exp2/final_results_from_sonscience_project/one_attempt_rhythmic', pattern = 'complete=true', full.names = TRUE)
 
 
-multi_attempt_rhythmic_files <- list.files('../data/exp4/final_results_from_sonscience_project/multi_attempt_rhythmic', pattern = 'complete=true', full.names = TRUE)
+multi_attempt_arrhythmic_files <- list.files('../data/exp2/final_results_from_sonscience_project/multi_attempt_arrhythmic', pattern = 'complete=true', full.names = TRUE)
+
+
+multi_attempt_rhythmic_files <- list.files('../data/exp2/final_results_from_sonscience_project/multi_attempt_rhythmic', pattern = 'complete=true', full.names = TRUE)
 
 
 ```
@@ -350,27 +350,27 @@ multi_attempt_rhythmic_files <- list.files('../data/exp4/final_results_from_sons
 
 # DEMOGRAPHICS
 
-exp4_dem_1 <- read_excel('../data/exp4/final_results_from_sonscience_project/aux/20220531_Survey_1-4.xlsx', sheet = 1)
-exp4_dem_2 <- read_excel('../data/exp4/final_results_from_sonscience_project/aux/20220531_Survey_1-4.xlsx', sheet = 2) %>% 
+exp2_dem_1 <- read_excel('../data/exp2/final_results_from_sonscience_project/aux/20220531_Survey_1-4.xlsx', sheet = 1)
+exp2_dem_2 <- read_excel('../data/exp2/final_results_from_sonscience_project/aux/20220531_Survey_1-4.xlsx', sheet = 2) %>% 
   rename(`Age Range` = `Range Age`)
-exp4_dem_3 <- read_excel('../data/exp4/final_results_from_sonscience_project/aux/20220531_Survey_1-4.xlsx', sheet = 3) %>% 
+exp2_dem_3 <- read_excel('../data/exp2/final_results_from_sonscience_project/aux/20220531_Survey_1-4.xlsx', sheet = 3) %>% 
   rename(`Age Range` = `Range Age`)
-exp4_dem_4 <- read_excel('../data/exp4/final_results_from_sonscience_project/aux/20220531_Survey_1-4.xlsx', sheet = 4)
+exp2_dem_4 <- read_excel('../data/exp2/final_results_from_sonscience_project/aux/20220531_Survey_1-4.xlsx', sheet = 4)
 
-exp4_demographics <- rbind(exp4_dem_1, exp4_dem_2, exp4_dem_3, exp4_dem_4) %>% 
+exp2_demographics <- rbind(exp2_dem_1, exp2_dem_2, exp2_dem_3, exp2_dem_4) %>% 
   mutate(Gender = case_when(GenderId == 1 ~ "Male", TRUE ~ "Female")) %>% 
   unique()
 
-exp4_demographic_summary <- exp4_demographics %>% 
+exp2_demographic_summary <- exp2_demographics %>% 
   count(Gender)
 
-exp4_PercentFemale <- exp4_demographic_summary %>% 
+exp2_PercentFemale <- exp2_demographic_summary %>% 
   filter(Gender == "Female") %>% 
-  pull(n) / (exp4_demographic_summary %>% filter(Gender == "Female") %>% pull(n) + exp4_demographic_summary %>% filter(Gender == "Male") %>% 
+  pull(n) / (exp2_demographic_summary %>% filter(Gender == "Female") %>% pull(n) + exp2_demographic_summary %>% filter(Gender == "Male") %>% 
    pull(n))
   
 
-exp4_age_summary <- exp4_demographics %>% 
+exp2_age_summary <- exp2_demographics %>% 
   dplyr::select(Age) %>% 
   summarise(
         SD = sd(Age),
@@ -379,11 +379,11 @@ exp4_age_summary <- exp4_demographics %>%
   mutate(across(SD:`Max.`, round, 2))
 
 
-exp4_demographic_summary_country <- exp4_demographics %>% 
+exp2_demographic_summary_country <- exp2_demographics %>% 
   count(CountryCode) %>% 
   mutate(Percent = round(n/sum(n)*100, 2))
 
-#exp4_age_summary
+#exp2_age_summary
 
 ```
 
@@ -418,13 +418,13 @@ long_note_dat <- sort_all_long_note_trials(batches) %>%
 
 ```{r eval = FALSE}
 
-save(long_note_dat, file = '../data/exp4/output_data/long_note_dat.rda')
+save(long_note_dat, file = '../data/exp2/output_data/long_note_dat.rda')
 
 ```
 
 ```{r}
 
-load(file = '../data/exp4/output_data/long_note_dat.rda')
+load(file = '../data/exp2/output_data/long_note_dat.rda')
 
 ```
 
@@ -471,7 +471,7 @@ Instead of participants selecting a vocal range which best suits their voice bas
 
 # Participants
 
-910 participants aged `r exp4_age_summary$Min.`-`r exp4_age_summary$Max.` (*M* = `r exp4_age_summary$Mean`, *SD* = `r exp4_age_summary$SD`; `r round(exp4_PercentFemale*100, 2)`% female were recruited through the *SliceThePie* marketing panel, across four testing conditions (*N* = `r nrow(exp4_dem_1)`; *N* = `r nrow(exp4_dem_2)`; *N* = `r nrow(exp4_dem_3)`; *N* = `r nrow(exp4_dem_4)`). 67% were from the US, 25% UK, 5% Canada, and the remaining other countries. 8 participants' demographic data was missing (reason unknown).
+910 participants aged `r exp2_age_summary$Min.`-`r exp2_age_summary$Max.` (*M* = `r exp2_age_summary$Mean`, *SD* = `r exp2_age_summary$SD`; `r round(exp2_PercentFemale*100, 2)`% female were recruited through the *SliceThePie* marketing panel, across four testing conditions (*N* = `r nrow(exp2_dem_1)`; *N* = `r nrow(exp2_dem_2)`; *N* = `r nrow(exp2_dem_3)`; *N* = `r nrow(exp2_dem_4)`). 67% were from the US, 25% UK, 5% Canada, and the remaining other countries. 8 participants' demographic data was missing (reason unknown).
 
 
 # Materials
@@ -543,13 +543,13 @@ save(multi_attempt_rhythmic, file = '../data/output_data/multi_attempt_rhythmic.
 
 ```{r eval = FALSE}
 
-load(file = '../data/exp4/output_data/one_attempt_arrhythmic.rda')
+load(file = '../data/exp2/output_data/one_attempt_arrhythmic.rda')
 
-load(file = '../data/exp4/output_data/one_attempt_rhythmic.rda')
+load(file = '../data/exp2/output_data/one_attempt_rhythmic.rda')
 
-load(file = '../data/exp4/output_data/multi_attempt_arrhythmic.rda')
+load(file = '../data/exp2/output_data/multi_attempt_arrhythmic.rda')
 
-load(file = '../data/exp4/output_data/multi_attempt_rhythmic.rda')
+load(file = '../data/exp2/output_data/multi_attempt_rhythmic.rda')
 
 
 ```
@@ -591,7 +591,7 @@ dat <- map_dfr(df_list, function(df) {
   mutate(unique_melody_name = paste0(stimuli, "|", stimuli_durations)) %>%
   ungroup()
 
-save(dat, file = '../data/exp4/output_data/dat.rda')
+save(dat, file = '../data/exp2/output_data/dat.rda')
 
 rm(one_attempt_arrhythmic, one_attempt_rhythmic, multi_attempt_arrhythmic, multi_attempt_rhythmic, df_list)
 gc()
@@ -603,7 +603,7 @@ gc()
 
 ```{r}
 
-load(file = '../data/exp4/output_data/dat.rda')
+load(file = '../data/exp2/output_data/dat.rda')
 
 ```
 
@@ -613,18 +613,18 @@ load(file = '../data/exp4/output_data/dat.rda')
 
 dat <- dat %>%
   rowwise() %>% 
-  mutate(pyin = list(pyin::pyin(paste0('../data/exp4/final_results_from_sonscience_project/sonscience_melodic_recall_audio/', audio_file)))) %>% 
+  mutate(pyin = list(pyin::pyin(paste0('../data/exp2/final_results_from_sonscience_project/sonscience_melodic_recall_audio/', audio_file)))) %>% 
   ungroup()
 
 
-save(dat, file = '../data/exp4/output_data/dat3.rda')
+save(dat, file = '../data/exp2/output_data/dat3.rda')
 
 ```
 
 
 ```{r}
 
-load(file = '../data/exp4/output_data/dat3.rda')
+load(file = '../data/exp2/output_data/dat3.rda')
 
 ```
 
@@ -650,13 +650,13 @@ dat <- dat %>%
   melody_interval_accuracy = score_melody_interval_accuracy(sung_interval, sung_interval_cents, stimuli_interval)) %>% 
   ungroup()
 
-save(dat, file = '../data/exp4/output_data/dat4.rda')
+save(dat, file = '../data/exp2/output_data/dat4.rda')
 
 ```
 
 ```{r}
 
-load(file = '../data/exp4/output_data/dat4.rda')
+load(file = '../data/exp2/output_data/dat4.rda')
 
 ```
 
@@ -668,7 +668,7 @@ dat <- dat %>%
     melody_interval_accuracy = score_melody_interval_accuracy(sung_interval, sung_interval_cents, stimuli_df$stimuli_interval)) %>% 
   ungroup()
 
-save(dat, file = '../data/exp4/output_data/dat5.rda')
+save(dat, file = '../data/exp2/output_data/dat5.rda')
 
 
 ```
@@ -676,7 +676,7 @@ save(dat, file = '../data/exp4/output_data/dat5.rda')
 
 ```{r}
 
-load(file = '../data/exp4/output_data/dat5.rda')
+load(file = '../data/exp2/output_data/dat5.rda')
 
 ```
 
@@ -692,7 +692,7 @@ dat <- dat %>%
                                                           allOctaves = TRUE))) %>% 
   ungroup()
 
-save(dat, file = '../data/exp4/output_data/dat6.rda')
+save(dat, file = '../data/exp2/output_data/dat6.rda')
 
 
 ```
@@ -700,7 +700,7 @@ save(dat, file = '../data/exp4/output_data/dat6.rda')
 
 ```{r}
 
-load(file = '../data/exp4/output_data/dat6.rda')
+load(file = '../data/exp2/output_data/dat6.rda')
 
 ```
 
@@ -794,9 +794,9 @@ no_unique_melodies <- dat_only_Berkowitz %>%
 
 ```{r}
 
-exp4_tab1 <- tibble(Measure = character(), Description = character())
+exp2_tab1 <- tibble(Measure = character(), Description = character())
 
-ft <- qflextable(exp4_tab1)
+ft <- qflextable(exp2_tab1)
 
 ft <- add_body(ft, top = FALSE, values = tibble(Measure = "Long Note", Description = " ") )
 
@@ -945,7 +945,7 @@ long_note_dat <- long_note_dat %>%
   ) %>% 
   mutate(
     file = str_remove(file, "/srv/shiny-server/files/"),
-    local_file = paste0("../data/exp4/final_results_from_sonscience_project/sonscience_melodic_recall_audio_long_note/", file)
+    local_file = paste0("../data/exp2/final_results_from_sonscience_project/sonscience_melodic_recall_audio_long_note/", file)
   ) 
 
 
@@ -961,7 +961,7 @@ long_note_dat <- long_note_dat %>%
          pyin = list(pyin$notes)) %>% 
   ungroup()
 
-save(long_note_dat, file = '../data/exp4/output_data/long_note_dat2.rda')
+save(long_note_dat, file = '../data/exp2/output_data/long_note_dat2.rda')
 
 
 ```
@@ -969,7 +969,7 @@ save(long_note_dat, file = '../data/exp4/output_data/long_note_dat2.rda')
 
 ```{r}
 
-load(file = '../data/exp4/output_data/long_note_dat2.rda')
+load(file = '../data/exp2/output_data/long_note_dat2.rda')
 
 
 ```
@@ -1064,14 +1064,14 @@ long_note_dat_nas_removed <- long_note_dat_nas_removed %>%
   unique()
 
 
-save(long_note_dat_nas_removed, file = '../data/exp4/output_data/long_note_dat_nas_removed.rda')
+save(long_note_dat_nas_removed, file = '../data/exp2/output_data/long_note_dat_nas_removed.rda')
 
 
 ```
 
 ```{r}
 
-load(file = '../data/exp4/output_data/long_note_dat_nas_removed.rda')
+load(file = '../data/exp2/output_data/long_note_dat_nas_removed.rda')
 
 ```
 
@@ -1145,13 +1145,13 @@ print(long_note_pca2, cut = 0.3)
 
 ```{r}
 
-save(long_note_agg, file = '../data/exp4/output_data/long_note_agg.rda')
+save(long_note_agg, file = '../data/exp2/output_data/long_note_agg.rda')
 
 ```
 
 ```{r}
 
-save(long_note_pca2, file = '../data/exp4/output_data/long_note_pca.rda')
+save(long_note_pca2, file = '../data/exp2/output_data/long_note_pca.rda')
 
 ```
 
@@ -1188,7 +1188,7 @@ singing_scores <- dat %>%
   unique()
 
 
-save(singing_scores, file = '../data/exp4/output_data/singing_scores.rda')
+save(singing_scores, file = '../data/exp2/output_data/singing_scores.rda')
 
 
 ```
@@ -1196,7 +1196,7 @@ save(singing_scores, file = '../data/exp4/output_data/singing_scores.rda')
 
 ```{r}
 
-load(file = '../data/exp4/output_data/singing_scores.rda')
+load(file = '../data/exp2/output_data/singing_scores.rda')
 
 ```
 
@@ -1290,13 +1290,13 @@ melody_pca2 <- dvs_summarised %>%
 
 print(melody_pca2, cut = 0.3, order = TRUE)
 
-save(melody_pca2, file = '../data/exp4/output_data/melody_pca2.rda')
+save(melody_pca2, file = '../data/exp2/output_data/melody_pca2.rda')
 
 melody_pca2_data <- dvs_summarised %>% 
   dplyr::select(note_precision, interval_precision, melody_interval_accuracy)
 
 
-save(melody_pca2_data, file = '../data/exp4/output_data/melody_pca2_data.rda')
+save(melody_pca2_data, file = '../data/exp2/output_data/melody_pca2_data.rda')
 
 ```
 
@@ -1383,10 +1383,6 @@ sjPlot::tab_model(lm1, title = "Model 1: Mixed effects model regressing opti3 on
 
 ```{r}
 
-# knitr::kable(tibble(), caption = "Model 1: Mixed effects model regressing opti3 onto melodic feature variables as fixed effects and participant as random effect.")
-# 
-# knitr::include_graphics('../data/other/Exp2_Table 5.png')
-
 lm1 |>
 papaja::apa_print() |>
 papaja::apa_table(caption = "Model 1: Mixed effects model regressing opti3 onto melodic feature variables as fixed effects and participant as random effect, across all melodic stimulus items.") 
@@ -1435,7 +1431,7 @@ MuMIn::r.squaredGLMM(lm2.2)
 
 ```{r}
 
-save(lm2.2, file = '../data/exp4/output_data/Berkowitz_arrhythmic_mixed_effects_model.rda')
+save(lm2.2, file = '../data/exp2/output_data/Berkowitz_arrhythmic_mixed_effects_model.rda')
 
 ```
 
@@ -1449,7 +1445,7 @@ scaled_vars %>% dplyr::select(-p_id) %>% itembankr::hist_item_bank()
 
 lm2.2_scaled <- lmerTest::lmer(opti3 ~ N + step.cont.loc.var + tonalness + log_freq + (1|p_id), data = scaled_vars)
 
-save(lm2.2_scaled, file = '../data/exp4/output_data/Berkowitz_arrhythmic_mixed_effects_model_scaled.rda')
+save(lm2.2_scaled, file = '../data/exp2/output_data/Berkowitz_arrhythmic_mixed_effects_model_scaled.rda')
 
 ```
 
@@ -1461,7 +1457,7 @@ summary(lm_arrhythmic_length_only)
 
 MuMIn::r.squaredGLMM(lm_arrhythmic_length_only)
 
-save(lm_arrhythmic_length_only, file = '../data/exp4/output_data/lm_arrhythmic_length_only.rda')
+save(lm_arrhythmic_length_only, file = '../data/exp2/output_data/lm_arrhythmic_length_only.rda')
 
 ```
 
@@ -1473,7 +1469,7 @@ save(lm_arrhythmic_length_only, file = '../data/exp4/output_data/lm_arrhythmic_l
 # fit the model
 lm_arrhythmic_length_only <- lmerTest::lmer(opti3 ~ N + (1|p_id), data = dat_one_attempt_arrhythmic)
 
-save(lm_arrhythmic_length_only, file = '../data/exp4/output_data/lm_arrhythmic_length_only.rda')
+save(lm_arrhythmic_length_only, file = '../data/exp2/output_data/lm_arrhythmic_length_only.rda')
 
 # grab p_ids
 p_ids <- dat_one_attempt_arrhythmic %>% 
@@ -1967,9 +1963,9 @@ MuMIn::r.squaredGLMM(lm3.2)
 
 ```{r}
 
-save(lm2.2, file = '../data/exp4/output_data/Berkowitz_arrhythmic_mixed_effects_model.rda')
+save(lm2.2, file = '../data/exp2/output_data/Berkowitz_arrhythmic_mixed_effects_model.rda')
 
-save(lm3.2, file = '../data/exp4/output_data/Berkowitz_rhythmic_mixed_effects_model.rda')
+save(lm3.2, file = '../data/exp2/output_data/Berkowitz_rhythmic_mixed_effects_model.rda')
 
 
 ```
@@ -1980,12 +1976,12 @@ save(lm3.2, file = '../data/exp4/output_data/Berkowitz_rhythmic_mixed_effects_mo
 
 ```{r}
 
-exp4_dem_small <- exp4_demographics %>% 
+exp2_dem_small <- exp2_demographics %>% 
   dplyr::select(UserId, Age, Gender) %>% 
   rename(p_id = UserId) %>% 
   unique()
 
-dat <- dat %>% left_join(exp4_dem_small, by = "p_id")
+dat <- dat %>% left_join(exp2_dem_small, by = "p_id")
 
 ```
 
@@ -2106,10 +2102,6 @@ sjPlot::tab_model(lm2.2, title = "Table 6: Mixed effects model regressing opti3 
 
 ```{r}
 
-# knitr::kable(tibble::tibble(),
-#              caption = "Model 2.2: Mixed effects model regressing opti3 onto melodic feature variables as fixed effects and participant as random effect, with only arhythmic trials.")
-# 
-# knitr::include_graphics('../data/other/Exp2_Table 6.png')
 
 lm2.2 |>
 papaja::apa_print() |>
@@ -2127,12 +2119,6 @@ sjPlot::tab_model(lm3.2, title = "Table 7: Mixed effects model regressing opti3 
 ```
 
 ```{r}
-
-# knitr::kable(tibble::tibble(),
-#              caption = "Model 3.2: Mixed effects model regressing opti3 onto melodic feature variables as fixed effects and participant as random effect, with only rhythmic trials.")
-# 
-# knitr::include_graphics('../data/other/Exp2_Table 7.png')
-
 
 lm3.2 |>
 papaja::apa_print() |>
